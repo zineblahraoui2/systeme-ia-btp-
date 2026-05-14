@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
+import logging
 import os
 import secrets
 from email.utils import parsedate_to_datetime
@@ -27,6 +29,7 @@ from config import get_settings
 
 
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+logger = logging.getLogger(__name__)
 
 
 def _base64url_no_padding(data: bytes) -> str:
@@ -36,6 +39,29 @@ def _base64url_no_padding(data: bytes) -> str:
 def _credentials_paths() -> tuple[Path, Path]:
     settings = get_settings()
     return Path(settings.google_credentials_file), Path(settings.google_token_file)
+
+
+def _load_credentials_from_env(token_json: str) -> Optional[Credentials]:
+    try:
+        token_info = json.loads(token_json)
+        return Credentials.from_authorized_user_info(token_info, GMAIL_SCOPES)
+    except Exception as exc:
+        logger.warning("GMAIL_TOKEN est present mais invalide: %s", exc)
+        return None
+
+
+def _save_gmail_token(creds: Credentials, token_path: Path) -> None:
+    settings = get_settings()
+    token_json = creds.to_json()
+    if settings.is_railway:
+        os.environ["GMAIL_TOKEN"] = token_json
+        logger.warning(
+            "Token Gmail rafraichi sur Railway. Mets a jour la variable GMAIL_TOKEN "
+            "dans Railway Variables avec le nouveau JSON du token."
+        )
+        return
+
+    token_path.write_text(token_json, encoding="utf-8")
 
 
 def _build_flow(state: Optional[str] = None) -> Flow:
@@ -57,9 +83,13 @@ def _build_flow(state: Optional[str] = None) -> Flow:
 
 
 def get_valid_gmail_credentials() -> Optional[Credentials]:
+    settings = get_settings()
     _, token_path = _credentials_paths()
     creds: Optional[Credentials] = None
-    if token_path.exists():
+
+    if settings.gmail_token:
+        creds = _load_credentials_from_env(settings.gmail_token)
+    elif token_path.exists():
         try:
             creds = Credentials.from_authorized_user_file(str(token_path), GMAIL_SCOPES)
         except Exception:
@@ -68,7 +98,7 @@ def get_valid_gmail_credentials() -> Optional[Credentials]:
     if creds and creds.expired and creds.refresh_token:
         try:
             creds.refresh(Request())
-            token_path.write_text(creds.to_json(), encoding="utf-8")
+            _save_gmail_token(creds, token_path)
         except Exception:
             return None
 
@@ -110,7 +140,7 @@ def exchange_code_for_token(
     flow = _build_flow(state=state)
     flow.fetch_token(code=code, code_verifier=code_verifier)
     creds = flow.credentials
-    token_path.write_text(creds.to_json(), encoding="utf-8")
+    _save_gmail_token(creds, token_path)
     return creds
 
 
