@@ -1,0 +1,10 @@
+.env
+.venv/
+token.json
+credentials.json
+client_secret_*.json
+__pycache__/
+*.pyc
+chroma_db/
+uploads/
+logs/
