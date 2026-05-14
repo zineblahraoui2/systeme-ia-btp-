@@ -24,6 +24,7 @@ MODEL = os.getenv("MODEL") or os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL"
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 CHROMA_COLLECTION_NAME = os.getenv("CHROMA_COLLECTION_NAME", "btp_knowledge")
 CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR") or ("/data/chroma_db" if IS_RAILWAY else "./chroma_db")
+GMAIL_CREDENTIALS = os.getenv("GMAIL_CREDENTIALS", None)
 GMAIL_TOKEN = os.getenv("GMAIL_TOKEN", None)
 
 
@@ -60,6 +61,7 @@ class Settings(BaseSettings):
     # Gmail API
     google_credentials_file: str = "credentials.json"
     google_token_file: str = "token.json"
+    gmail_credentials: str | None = GMAIL_CREDENTIALS
     gmail_token: str | None = GMAIL_TOKEN
     google_redirect_uri: str = f"http://localhost:{API_PORT}/auth/gmail/callback"
     gmail_query: str = "newer_than:30d"

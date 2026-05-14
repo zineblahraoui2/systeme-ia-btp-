@@ -41,12 +41,25 @@ def _credentials_paths() -> tuple[Path, Path]:
     return Path(settings.google_credentials_file), Path(settings.google_token_file)
 
 
-def _load_credentials_from_env(token_json: str) -> Optional[Credentials]:
+def _load_token_from_env(token_json: str) -> Optional[Credentials]:
     try:
         token_info = json.loads(token_json)
         return Credentials.from_authorized_user_info(token_info, GMAIL_SCOPES)
     except Exception as exc:
         logger.warning("GMAIL_TOKEN est present mais invalide: %s", exc)
+        return None
+
+
+def _load_client_config_from_env(credentials_json: str) -> Optional[dict]:
+    try:
+        client_config = json.loads(credentials_json)
+        if not isinstance(client_config, dict):
+            raise ValueError("JSON racine invalide")
+        if "installed" not in client_config and "web" not in client_config:
+            raise ValueError("JSON OAuth Google attendu avec cle 'installed' ou 'web'")
+        return client_config
+    except Exception as exc:
+        logger.warning("GMAIL_CREDENTIALS est present mais invalide: %s", exc)
         return None
 
 
@@ -67,13 +80,27 @@ def _save_gmail_token(creds: Credentials, token_path: Path) -> None:
 def _build_flow(state: Optional[str] = None) -> Flow:
     settings = get_settings()
     credentials_path, _ = _credentials_paths()
+    if settings.google_redirect_uri.startswith(("http://localhost", "http://127.0.0.1")):
+        os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
+
+    if settings.gmail_credentials:
+        client_config = _load_client_config_from_env(settings.gmail_credentials)
+        if not client_config:
+            raise RuntimeError("Variable GMAIL_CREDENTIALS invalide.")
+        return Flow.from_client_config(
+            client_config,
+            scopes=GMAIL_SCOPES,
+            redirect_uri=settings.google_redirect_uri,
+            state=state,
+        )
+
     if not credentials_path.exists():
         raise FileNotFoundError(
             f"Fichier Google credentials introuvable : {credentials_path}. "
-            "Telecharge le fichier OAuth client depuis Google Cloud et place-le ici."
+            "Telecharge le fichier OAuth client depuis Google Cloud et place-le ici, "
+            "ou configure GMAIL_CREDENTIALS sur Railway."
         )
-    if settings.google_redirect_uri.startswith(("http://localhost", "http://127.0.0.1")):
-        os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
+
     return Flow.from_client_secrets_file(
         str(credentials_path),
         scopes=GMAIL_SCOPES,
@@ -88,7 +115,7 @@ def get_valid_gmail_credentials() -> Optional[Credentials]:
     creds: Optional[Credentials] = None
 
     if settings.gmail_token:
-        creds = _load_credentials_from_env(settings.gmail_token)
+        creds = _load_token_from_env(settings.gmail_token)
     elif token_path.exists():
         try:
             creds = Credentials.from_authorized_user_file(str(token_path), GMAIL_SCOPES)
