@@ -69,6 +69,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.get("/", tags=["Health"])
+def root() -> dict:
+    return {
+        "statut": "ok",
+        "service": "Système IA BTP",
+        "docs": "/docs",
+        "api": "/api/v1",
+    }
+
+
+@app.get("/health", tags=["Health"])
+def health() -> dict:
+    return {"statut": "ok", "service": "Système IA BTP"}
+
+
 # Routes
 app.include_router(auth_router, tags=["Auth"])
 app.include_router(router, prefix="/api/v1", tags=["BTP"])
