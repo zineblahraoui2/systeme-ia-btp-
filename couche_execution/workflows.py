@@ -320,6 +320,21 @@ MOTS_CLES_BTP_EMAIL = [
     "mur", "dalle", "toiture", "façade", "facade", "ferraillage",
 ]
 
+BLACKLIST_EMAIL_SENDERS = [
+    "rekrute",
+    "linkedin",
+    "newsletter",
+    "mltut",
+    "alphasignal",
+    "alison",
+    "coursera",
+    "udemy",
+    "medium.com",
+    "substack",
+    "github",
+    "google",
+]
+
 
 def _filtrer_emails_btp(documents: list, projet: str = "non_defini") -> list:
     projet_normalise = (projet or "").strip().lower()
@@ -328,10 +343,13 @@ def _filtrer_emails_btp(documents: list, projet: str = "non_defini") -> list:
 
     for doc in documents:
         meta = doc.metadata or {}
+        sender = str(meta.get("email_from", "")).lower()
+        if any(blocked in sender for blocked in BLACKLIST_EMAIL_SENDERS):
+            continue
+
         haystack = "\n".join(
             [
                 str(meta.get("email_subject", "")),
-                str(meta.get("email_from", "")),
                 doc.page_content or "",
             ]
         ).lower()

@@ -490,7 +490,13 @@ async def ingerer_fichier(
             lot_technique=lot_technique,
             criticite=criticite,
             auteur=auteur,
-            metadata_extra={"file_hash": file_hash, "fichier_original": fichier.filename},
+            metadata_extra={
+                "file_hash": file_hash,
+                "source": fichier.filename,
+                "source_fichier": fichier.filename,
+                "fichier_original": fichier.filename,
+                "nom_fichier": fichier.filename,
+            },
         )
         # Renommer la source avec le nom original
         resultat["fichier_original"] = fichier.filename
