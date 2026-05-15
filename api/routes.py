@@ -300,6 +300,7 @@ def _traiter_image_background(
             lot_technique=lot_technique,
             criticite=criticite,
             auteur=auteur,
+            fichier_original=fichier_nom,
         )
         resultat["fichier_original"] = fichier_nom
         _jobs[job_id] = {"statut": "termine", **resultat}

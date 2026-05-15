@@ -107,9 +107,23 @@ def ingerer_fichier(
         elif pipeline == "pdf_ocr":
             docs = extraire_pdf_ocr(fichier_path, projet, lot_technique, criticite, auteur)
         elif pipeline == "image_ocr":
-            docs = extraire_image_ocr(fichier_path, projet, lot_technique, criticite, auteur)
+            docs = extraire_image_ocr(
+                fichier_path,
+                projet,
+                lot_technique,
+                criticite,
+                auteur,
+                metadata_extra.get("fichier_original") or metadata_extra.get("source_fichier"),
+            )
         elif pipeline == "image_clip":
-            return extraire_image_clip(fichier_path, projet, lot_technique, criticite, auteur)
+            return extraire_image_clip(
+                fichier_path,
+                projet,
+                lot_technique,
+                criticite,
+                auteur,
+                metadata_extra.get("fichier_original") or metadata_extra.get("source_fichier"),
+            )
         elif pipeline == "bim_ifc":
             docs, resume_bim = extraire_bim_ifc(fichier_path, projet, lot_technique, "haute", auteur)
         elif pipeline == "dtu_norme":

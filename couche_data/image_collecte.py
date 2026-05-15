@@ -259,9 +259,13 @@ def _metadata_base(
     lot_technique: str,
     criticite: str,
     auteur: str = "inconnu",
+    fichier_original: Optional[str] = None,
 ) -> dict:
+    fichier_nom = fichier_original or Path(fichier_path).name
     return {
-        "source": fichier_path,
+        "source": fichier_nom,
+        "source_fichier": fichier_nom,
+        "fichier_original": fichier_nom,
         "type_document": type_document,
         "projet": projet,
         "lot_technique": lot_technique,
@@ -269,8 +273,8 @@ def _metadata_base(
         "auteur": auteur,
         "date": datetime.today().strftime("%Y-%m-%d"),
         "ingere_le": datetime.today().strftime("%Y-%m-%d %H:%M:%S"),
-        "fichier_nom": Path(fichier_path).name,
-        "nom_fichier": Path(fichier_path).name,
+        "fichier_nom": fichier_nom,
+        "nom_fichier": fichier_nom,
     }
 
 
@@ -280,6 +284,7 @@ def extraire_image_ocr(
     lot_technique: str,
     criticite: str,
     auteur: str = "inconnu",
+    fichier_original: Optional[str] = None,
 ) -> List[Document]:
     """Pipeline 3: Tesseract OCR on image."""
     try:
@@ -303,6 +308,7 @@ def extraire_image_ocr(
                 lot_technique,
                 criticite,
                 auteur,
+                fichier_original,
             )
             | {
                 "ocr_engine": "tesseract",
@@ -361,6 +367,7 @@ def ingerer_image(
     lot_technique: str,
     criticite: str,
     auteur: str = "inconnu",
+    fichier_original: Optional[str] = None,
 ) -> dict:
     """
     Pipeline image unifie pour les traitements longs en arriere-plan.
@@ -382,21 +389,21 @@ def ingerer_image(
         from couche_data.nettoyage import nettoyer
         from couche_data.vectorisation import stats_collection, vectoriser
 
-        docs = extraire_image_ocr(fichier_path, projet, lot_technique, criticite, auteur)
+        docs = extraire_image_ocr(fichier_path, projet, lot_technique, criticite, auteur, fichier_original)
         docs = nettoyer(docs)
         if not docs:
             return {
                 "statut": "erreur",
                 "pipeline_utilise": "image_ocr",
                 "message": "Document image vide ou trop court apres nettoyage.",
-                "fichier": Path(fichier_path).name,
+                "fichier": fichier_original or Path(fichier_path).name,
             }
 
         vectoriser(docs)
         return {
             "statut": "succes",
             "pipeline_utilise": "image_ocr",
-            "fichier": Path(fichier_path).name,
+            "fichier": fichier_original or Path(fichier_path).name,
             "documents_ingeres": len(docs),
             "projet": projet,
             "texte_ocr_detecte": True,
@@ -406,7 +413,7 @@ def ingerer_image(
             "stats_collection": stats_collection(),
         }
 
-    return extraire_image_clip(fichier_path, projet, lot_technique, criticite, auteur)
+    return extraire_image_clip(fichier_path, projet, lot_technique, criticite, auteur, fichier_original)
 
 
 def extraire_image_clip(
@@ -415,6 +422,7 @@ def extraire_image_clip(
     lot_technique: str,
     criticite: str,
     auteur: str = "inconnu",
+    fichier_original: Optional[str] = None,
 ) -> dict:
     """Pipeline 4: OpenAI/Gemini vision for raw photos, with BLIP/CLIP fallback."""
     settings = get_settings()
@@ -437,6 +445,7 @@ def extraire_image_clip(
             lot_technique,
             criticite,
             auteur,
+            fichier_original,
         )
         metadata["description"] = description
         metadata["vision_backend"] = "openai"
@@ -449,14 +458,14 @@ def extraire_image_clip(
                 "statut": "erreur",
                 "pipeline_utilise": "image_openai",
                 "message": "Description OpenAI vide ou trop courte apres nettoyage.",
-                "fichier": Path(fichier_path).name,
+                "fichier": fichier_original or Path(fichier_path).name,
             }
 
         vectoriser(docs)
         return {
             "statut": "succes",
             "pipeline_utilise": "image_openai",
-            "fichier": Path(fichier_path).name,
+            "fichier": fichier_original or Path(fichier_path).name,
             "documents_ingeres": len(docs),
             "projet": projet,
             "description_openai": description,
@@ -483,6 +492,7 @@ def extraire_image_clip(
             lot_technique,
             criticite,
             auteur,
+            fichier_original,
         )
         metadata["description"] = description
         metadata["vision_backend"] = "gemini"
@@ -495,14 +505,14 @@ def extraire_image_clip(
                 "statut": "erreur",
                 "pipeline_utilise": "image_gemini",
                 "message": "Description Gemini vide ou trop courte apres nettoyage.",
-                "fichier": Path(fichier_path).name,
+                "fichier": fichier_original or Path(fichier_path).name,
             }
 
         vectoriser(docs)
         return {
             "statut": "succes",
             "pipeline_utilise": "image_gemini",
-            "fichier": Path(fichier_path).name,
+            "fichier": fichier_original or Path(fichier_path).name,
             "documents_ingeres": len(docs),
             "projet": projet,
             "description_gemini": description,
@@ -528,8 +538,14 @@ def extraire_image_clip(
         lot_technique,
         criticite,
         auteur,
+        fichier_original,
     )
-    description = description_blip or "Photo chantier BTP sans texte detecte"
+    description = description_blip or (
+        "Photo de chantier BTP sans texte OCR detecte. "
+        f"Fichier: {fichier_original or Path(fichier_path).name}. "
+        f"Projet: {projet}. Lot technique: {lot_technique}. "
+        "Image a analyser comme element visuel de suivi chantier, qualite, securite ou avancement."
+    )
     metadata["description"] = description
     metadata["description_blip"] = description_blip or ""
     metadata["clip_model"] = get_settings().clip_model_name
@@ -550,20 +566,27 @@ def extraire_image_clip(
         collection_name = "btp_images_clip"
         stats = _stats_collection_clip(collection)
     else:
-        from couche_data.nettoyage import nettoyer
-        from couche_data.vectorisation import stats_collection, vectoriser
-
-        metadata["type_document"] = "image_blip"
-        docs = nettoyer([Document(page_content=description, metadata=metadata)])
-        if docs:
-            vectoriser(docs)
         collection_name = get_settings().chroma_collection_name
-        stats = stats_collection()
+        stats = {}
+
+    from couche_data.nettoyage import nettoyer
+    from couche_data.vectorisation import stats_collection, vectoriser
+
+    text_metadata = dict(metadata)
+    text_metadata["type_document"] = "image_blip" if description_blip else "image_description"
+    docs = nettoyer([Document(page_content=description, metadata=text_metadata)])
+    if docs:
+        vectoriser(docs)
+    main_stats = stats_collection()
+    if collection_name == "btp_images_clip":
+        stats = {"clip_collection": stats, "text_collection": main_stats}
+    else:
+        stats = main_stats
 
     return {
         "statut": "succes",
         "pipeline_utilise": "image_clip" if embedding is not None else "image_blip",
-        "fichier": Path(fichier_path).name,
+        "fichier": fichier_original or Path(fichier_path).name,
         "documents_ingeres": 1,
         "projet": projet,
         "description_blip": description_blip,
