@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+import json
 import mimetypes
+import re
 import uuid
 from datetime import datetime
 from functools import lru_cache
@@ -43,6 +45,28 @@ Retourne une analyse structuree avec ces rubriques:
 7. Actions recommandees pour le chef de chantier.
 
 Si un element n'est pas clairement visible, indique "non visible" au lieu d'inventer.
+""".strip()
+
+
+VISION_JSON_PROMPT = """
+Tu es un expert BTP charge d'analyser des photos de chantier.
+Analyse cette image et reponds uniquement avec un objet JSON valide, sans markdown ni backticks.
+
+Structure attendue:
+{
+  "description": "Description detaillee de ce que montre l'image",
+  "elements_identifies": ["liste", "des", "elements", "visibles"],
+  "corps_de_metier": ["ex: gros_oeuvre", "electricite", "plomberie", "menuiserie"],
+  "non_conformites": ["liste des problemes ou anomalies detectes, vide si aucun"],
+  "criticite": "faible | moyenne | haute | critique",
+  "lot_probable": "nom du lot technique le plus probable",
+  "phase_chantier": "ex: fondations, gros_oeuvre, second_oeuvre, finitions, reception",
+  "actions_recommandees": ["actions correctives si anomalie, vide sinon"],
+  "mots_cles_btp": ["mots-cles metier pour la recherche"]
+}
+
+Sois precis et utilise le vocabulaire technique BTP francais.
+Si l'image n'est pas une photo de chantier, indique-le dans description et adapte l'analyse au contexte BTP sans inventer.
 """.strip()
 
 
@@ -134,14 +158,97 @@ def _is_gemini_quota_error(exc: Exception) -> bool:
     )
 
 
+def _liste_str(value) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def _normaliser_criticite_vision(value: str, fallback: str = "normale") -> str:
+    normalized = (value or "").strip().lower()
+    mapping = {
+        "moyenne": "normale",
+        "medium": "normale",
+        "élevée": "haute",
+        "elevee": "haute",
+        "urgent": "critique",
+    }
+    normalized = mapping.get(normalized, normalized)
+    if normalized in {"faible", "normale", "haute", "critique"}:
+        return normalized
+    return fallback or "normale"
+
+
+def _analyse_vision_fallback(contenu: str, criticite: str = "normale") -> dict:
+    return {
+        "description": contenu.strip(),
+        "elements_identifies": [],
+        "corps_de_metier": [],
+        "non_conformites": [],
+        "criticite": _normaliser_criticite_vision(criticite),
+        "lot_probable": "inconnu",
+        "phase_chantier": "inconnu",
+        "actions_recommandees": [],
+        "mots_cles_btp": [],
+    }
+
+
+def _normaliser_analyse_vision(analyse: dict, criticite: str = "normale") -> dict:
+    if not isinstance(analyse, dict):
+        return _analyse_vision_fallback(str(analyse), criticite)
+    return {
+        "description": str(analyse.get("description") or "").strip(),
+        "elements_identifies": _liste_str(analyse.get("elements_identifies")),
+        "corps_de_metier": _liste_str(analyse.get("corps_de_metier")),
+        "non_conformites": _liste_str(analyse.get("non_conformites")),
+        "criticite": _normaliser_criticite_vision(str(analyse.get("criticite") or ""), criticite),
+        "lot_probable": str(analyse.get("lot_probable") or "inconnu").strip() or "inconnu",
+        "phase_chantier": str(analyse.get("phase_chantier") or "inconnu").strip() or "inconnu",
+        "actions_recommandees": _liste_str(analyse.get("actions_recommandees")),
+        "mots_cles_btp": _liste_str(analyse.get("mots_cles_btp")),
+    }
+
+
+def _parse_analyse_vision(contenu: str, criticite: str) -> dict:
+    contenu_propre = re.sub(r"```json|```", "", contenu or "", flags=re.I).strip()
+    try:
+        return _normaliser_analyse_vision(json.loads(contenu_propre), criticite)
+    except json.JSONDecodeError:
+        return _analyse_vision_fallback(contenu, criticite)
+
+
+def construire_texte_recherchable_image(analyse: dict, nom_fichier: str) -> str:
+    parties = [
+        f"IMAGE CHANTIER : {nom_fichier}",
+        f"Description : {analyse.get('description', '')}",
+    ]
+    if analyse.get("elements_identifies"):
+        parties.append("Elements : " + ", ".join(analyse["elements_identifies"]))
+    if analyse.get("corps_de_metier"):
+        parties.append("Corps de metier : " + ", ".join(analyse["corps_de_metier"]))
+    if analyse.get("non_conformites"):
+        parties.append("Non-conformites : " + " | ".join(analyse["non_conformites"]))
+    if analyse.get("lot_probable"):
+        parties.append(f"Lot probable : {analyse['lot_probable']}")
+    if analyse.get("phase_chantier"):
+        parties.append(f"Phase chantier : {analyse['phase_chantier']}")
+    if analyse.get("actions_recommandees"):
+        parties.append("Actions recommandees : " + " | ".join(analyse["actions_recommandees"]))
+    if analyse.get("mots_cles_btp"):
+        parties.append("Mots-cles BTP : " + ", ".join(analyse["mots_cles_btp"]))
+    return "\n".join(part for part in parties if part.strip())
+
+
 def analyser_image_openai(
     image_path: str,
     projet: str,
     lot_technique: str,
     criticite: str,
     auteur: str = "inconnu",
-) -> str:
-    """Analyse une photo de chantier avec le modele OpenAI-compatible configure."""
+) -> dict:
+    """Analyse une photo de chantier avec OpenAI Vision et retourne un JSON BTP normalise."""
     settings = get_settings()
     if not settings.openai_api_key:
         raise RuntimeError(
@@ -162,17 +269,25 @@ def analyser_image_openai(
         image_base64 = base64.b64encode(image_file.read()).decode("ascii")
 
     client = OpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
-    prompt = _prompt_analyse_image_btp(image_path, projet, lot_technique, criticite, auteur)
+    prompt = "\n\n".join(
+        [
+            f"Projet: {projet}",
+            f"Lot technique declare: {lot_technique}",
+            f"Criticite declaree: {criticite}",
+            f"Auteur: {auteur}",
+            f"Fichier: {Path(image_path).name}",
+            VISION_JSON_PROMPT,
+        ]
+    )
 
     try:
         response = client.chat.completions.create(
-            model=settings.llm_model,
+            model=settings.vision_model,
             messages=[
                 {
                     "role": "system",
                     "content": (
-                        "Tu es un expert BTP. Reponds en francais avec une analyse "
-                        "visuelle concise, factuelle et exploitable."
+                        "Tu es un expert BTP. Tu reponds uniquement avec un objet JSON valide."
                     ),
                 },
                 {
@@ -183,23 +298,24 @@ def analyser_image_openai(
                             "type": "image_url",
                             "image_url": {
                                 "url": f"data:{mime_type};base64,{image_base64}",
+                                "detail": "high",
                             },
                         },
                     ],
                 },
             ],
             temperature=0.2,
-            max_tokens=min(settings.llm_max_tokens, 1200),
+            max_tokens=min(settings.llm_max_tokens, 1000),
         )
-        description = (response.choices[0].message.content or "").strip()
+        contenu = (response.choices[0].message.content or "").strip()
     except Exception as exc:
         raise RuntimeError(
-            f"Erreur analyse OpenAI image avec le modele '{settings.llm_model}' : {exc}"
+            f"Erreur analyse OpenAI image avec le modele '{settings.vision_model}' : {exc}"
         ) from exc
 
-    if not description:
+    if not contenu:
         raise RuntimeError("OpenAI n'a retourne aucune description exploitable pour cette image.")
-    return description
+    return _parse_analyse_vision(contenu, criticite)
 
 
 def analyser_image_gemini(
@@ -431,26 +547,36 @@ def extraire_image_clip(
         from couche_data.nettoyage import nettoyer
         from couche_data.vectorisation import stats_collection, vectoriser
 
-        description = analyser_image_openai(
+        analyse = analyser_image_openai(
             image_path=fichier_path,
             projet=projet,
             lot_technique=lot_technique,
             criticite=criticite,
             auteur=auteur,
         )
+        description = construire_texte_recherchable_image(
+            analyse,
+            fichier_original or Path(fichier_path).name,
+        )
         metadata = _metadata_base(
             fichier_path,
-            "image_openai",
+            "image_chantier",
             projet,
-            lot_technique,
-            criticite,
+            analyse.get("lot_probable") or lot_technique,
+            analyse.get("criticite") or criticite,
             auteur,
             fichier_original,
         )
         metadata["description"] = description
         metadata["vision_backend"] = "openai"
-        metadata["vision_model"] = settings.llm_model
+        metadata["vision_model"] = settings.vision_model
         metadata["texte_ocr_detecte"] = False
+        metadata["corps_de_metier"] = ", ".join(analyse.get("corps_de_metier", []))
+        metadata["phase_chantier"] = analyse.get("phase_chantier", "inconnu")
+        metadata["a_non_conformite"] = bool(analyse.get("non_conformites"))
+        metadata["nb_non_conformites"] = len(analyse.get("non_conformites", []))
+        metadata["description_courte"] = analyse.get("description", "")[:200]
+        metadata["mots_cles_btp"] = ", ".join(analyse.get("mots_cles_btp", []))
 
         docs = nettoyer([Document(page_content=description, metadata=metadata)])
         if not docs:
@@ -469,6 +595,10 @@ def extraire_image_clip(
             "documents_ingeres": len(docs),
             "projet": projet,
             "description_openai": description,
+            "analyse_complete": analyse,
+            "criticite": analyse.get("criticite"),
+            "lot": analyse.get("lot_probable"),
+            "non_conformites": analyse.get("non_conformites", []),
             "clip_encode": False,
             "collection": settings.chroma_collection_name,
             "stats_collection": stats_collection(),

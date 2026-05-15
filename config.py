@@ -21,6 +21,7 @@ BACKEND_URL = os.getenv("API_URL") or ("" if IS_RAILWAY else "http://127.0.0.1:8
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL") or os.getenv("BASE_URL", "https://api.openai.com/v1")
 MODEL = os.getenv("MODEL") or os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL", "openai/gpt-4.1")
+VISION_MODEL = os.getenv("VISION_MODEL", "gpt-4o")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 CHROMA_COLLECTION_NAME = os.getenv("CHROMA_COLLECTION_NAME", "btp_knowledge")
 CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR") or ("/data/chroma_db" if IS_RAILWAY else "./chroma_db")
@@ -71,6 +72,7 @@ class Settings(BaseSettings):
     # OCR / Vision
     gemini_api_key: str = ""
     vision_backend: str = "openai"
+    vision_model: str = VISION_MODEL
     clip_model_name: str = "openai/clip-vit-base-patch32"
     blip_model_name: str = "Salesforce/blip-image-captioning-base"
     tesseract_cmd: str = "C:/Program Files/Tesseract-OCR/tesseract.exe"
