@@ -24,7 +24,6 @@ import json
 import logging
 import os
 import secrets
-import shutil
 import tempfile
 import time
 import uuid
@@ -74,6 +73,23 @@ if not any(isinstance(handler, logging.FileHandler) for handler in logger.handle
 _jobs: dict[str, dict] = {}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".bmp"}
 OAUTH_STATE_TTL_SECONDS = 15 * 60
+
+
+def _duplicate_payload(file_hash: str) -> Optional[dict]:
+    try:
+        vectorstore = get_vectorstore()
+        raw = vectorstore.get(where={"file_hash": {"$eq": file_hash}}, include=["metadatas"])
+        chunks = len(raw.get("ids", []) or [])
+        if chunks > 0:
+            return {
+                "statut": "doublon",
+                "message": "Ce document est déjà dans la base",
+                "chunks_existants": chunks,
+                "file_hash": file_hash,
+            }
+    except Exception as exc:
+        logger.warning("Verification doublon impossible pour hash=%s: %s", file_hash, exc)
+    return None
 
 
 def _gmail_signed_auth_response(message: str = "Connexion Gmail requise.") -> dict:
@@ -283,6 +299,7 @@ class TexteIngestionRequest(BaseModel):
     auteur: str = "inconnu"
     criticite: str = "normale"
     type_document: str = "general"
+    forcer: bool = False
 
 
 class ConformiteRequest(BaseModel):
@@ -390,6 +407,7 @@ async def ingerer_fichier(
     lot_technique: str = Form("non_défini"),
     auteur: str = Form("inconnu"),
     criticite: str = Form("normale"),
+    forcer: bool = Form(False),
 ):
     """
     Upload et ingest complet d'un fichier dans la base vectorielle.
@@ -418,8 +436,16 @@ async def ingerer_fichier(
         )
 
     # Sauvegarde temporaire du fichier uploadé
+    file_content = await fichier.read()
+    file_hash = hashlib.md5(file_content).hexdigest()
+    if not forcer:
+        duplicate = _duplicate_payload(file_hash)
+        if duplicate:
+            duplicate["fichier_original"] = fichier.filename
+            return duplicate
+
     with tempfile.NamedTemporaryFile(delete=False, suffix=extension) as tmp:
-        shutil.copyfileobj(fichier.file, tmp)
+        tmp.write(file_content)
         tmp_path = tmp.name
 
     if extension in IMAGE_EXTENSIONS:
@@ -434,7 +460,7 @@ async def ingerer_fichier(
             pass
 
         job_id = uuid.uuid4().hex
-        _jobs[job_id] = {"statut": "en_cours", "fichier_original": fichier.filename}
+        _jobs[job_id] = {"statut": "en_cours", "fichier_original": fichier.filename, "file_hash": file_hash}
         background_tasks.add_task(
             _traiter_image_background,
             tmp_path,
@@ -454,6 +480,7 @@ async def ingerer_fichier(
             "message": "OCR termine. Analyse BLIP/CLIP en cours en arriere-plan.",
             "texte_ocr_apercu": texte_ocr_apercu,
             "projet": projet,
+            "file_hash": file_hash,
         }
 
     try:
@@ -463,9 +490,11 @@ async def ingerer_fichier(
             lot_technique=lot_technique,
             criticite=criticite,
             auteur=auteur,
+            metadata_extra={"file_hash": file_hash, "fichier_original": fichier.filename},
         )
         # Renommer la source avec le nom original
         resultat["fichier_original"] = fichier.filename
+        resultat["file_hash"] = file_hash
         return resultat
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -505,6 +534,12 @@ async def clear_knowledge_documents():
 async def ingerer_texte(body: TexteIngestionRequest):
     """Ingest d'un texte brut avec métadonnées BTP."""
     try:
+        text_hash = hashlib.md5(body.contenu.encode("utf-8")).hexdigest()
+        if not body.forcer:
+            duplicate = _duplicate_payload(text_hash)
+            if duplicate:
+                duplicate["source"] = body.source
+                return duplicate
         return ingerer_texte_brut(
             contenu=body.contenu,
             source=body.source,
@@ -513,6 +548,7 @@ async def ingerer_texte(body: TexteIngestionRequest):
             auteur=body.auteur,
             criticite=body.criticite,
             type_document=body.type_document,
+            metadata_extra={"file_hash": text_hash, "fichier_original": body.source},
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

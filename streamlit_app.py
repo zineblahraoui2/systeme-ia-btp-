@@ -299,6 +299,8 @@ with tab_ingest:
             key="file_criticite",
         )
 
+        forcer_fichier = st.checkbox("Forcer même si doublon", value=False, key="force_file")
+
         if st.button("Ingérer le fichier"):
             if fichier is None:
                 st.warning("Choisis un fichier.")
@@ -309,6 +311,7 @@ with tab_ingest:
                     "lot_technique": lot_fichier,
                     "auteur": auteur_fichier,
                     "criticite": criticite_fichier,
+                    "forcer": str(forcer_fichier).lower(),
                 }
                 try:
                     response = requests.post(
@@ -362,6 +365,8 @@ with tab_ingest:
             ["general", "email", "whatsapp", "rapport_chantier", "devis", "dtu", "norme", "reglementation"],
         )
 
+        forcer_texte = st.checkbox("Forcer même si doublon", value=False, key="force_text")
+
         if st.button("Ingérer le texte"):
             if not contenu.strip():
                 st.warning("Saisis un contenu.")
@@ -372,6 +377,7 @@ with tab_ingest:
                     "projet": projet_texte,
                     "lot_technique": lot_texte,
                     "type_document": type_document,
+                    "forcer": forcer_texte,
                 }
                 try:
                     response = requests.post(api_url("/ingerer/texte"), json=payload, timeout=API_TIMEOUT_SECONDS)

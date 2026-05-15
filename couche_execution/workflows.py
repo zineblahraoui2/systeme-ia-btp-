@@ -90,11 +90,13 @@ def ingerer_fichier(
     lot_technique: str,
     criticite: str,
     auteur: str = "inconnu",
+    metadata_extra: Optional[dict] = None,
 ) -> dict:
     """
     Workflow d'ingestion fichier avec routage intelligent.
     """
     try:
+        metadata_extra = metadata_extra or {}
         pipeline = router_document(fichier_path)
         resume_bim = None
         print(f"\n[workflow] Ingestion fichier intelligente | Pipeline : {pipeline}")
@@ -125,6 +127,9 @@ def ingerer_fichier(
                 "message": "Aucun document extrait du fichier.",
                 "fichier": Path(fichier_path).name,
             }
+
+        for doc in docs:
+            doc.metadata.update(metadata_extra)
 
         docs = nettoyer(docs)
         if not docs:
@@ -162,6 +167,7 @@ def ingerer_texte_brut(
     auteur: str = "inconnu",
     criticite: str = "normale",
     type_document: str = "general",
+    metadata_extra: Optional[dict] = None,
 ) -> dict:
     """
     Workflow d'ingestion d'un texte brut (email, WhatsApp, note terrain…).
@@ -173,6 +179,8 @@ def ingerer_texte_brut(
         "criticite": criticite,
         "type_document": type_document,
     }
+    if metadata_extra:
+        metadata.update(metadata_extra)
 
     print(f"\n[workflow] Ingestion texte brut | Source : {source} | Projet : {projet}")
 
