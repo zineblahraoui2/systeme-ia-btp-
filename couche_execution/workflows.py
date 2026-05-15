@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional
+import unicodedata
 from couche_data.bim_collecte import extraire_bim_ifc
 from couche_data.collecte import collecter_depuis_fichier, charger_texte_brut, charger_dossier
 from couche_data.document_router import router_document
@@ -489,6 +490,12 @@ BLACKLIST_EMAIL_SENDERS = [
     "rekrute",
     "linkedin",
     "newsletter",
+    "glovo",
+    "quora",
+    "perplexity",
+    "dribbble",
+    "marie claire",
+    "selection quora",
     "mltut",
     "alphasignal",
     "alison",
@@ -499,6 +506,58 @@ BLACKLIST_EMAIL_SENDERS = [
     "github",
     "google",
 ]
+
+
+MOTS_CLES_BTP_FORTS = [
+    "chantier",
+    "beton",
+    "fondation",
+    "dtu",
+    "travaux",
+    "maconnerie",
+    "devis",
+    "charpente",
+    "plomberie",
+    "electricite",
+    "gros oeuvre",
+    "second oeuvre",
+    "btp",
+    "construction",
+    "renovation",
+    "architecte",
+    "conducteur de travaux",
+    "planning chantier",
+    "conformite",
+    "securite chantier",
+    "ferraillage",
+    "cctp",
+    "cps",
+    "sous-traitant",
+]
+
+MOTS_CLES_BTP_FAIBLES = [
+    "lot",
+    "livraison",
+    "intervention",
+    "reserve",
+    "pv",
+    "plan",
+    "plans",
+    "approvisionnement",
+]
+
+
+def _normaliser_filtre_email(value: str) -> str:
+    value = unicodedata.normalize("NFKD", value or "")
+    value = "".join(char for char in value if not unicodedata.combining(char))
+    return value.lower()
+
+
+def _score_btp_email(haystack: str) -> int:
+    normalized = _normaliser_filtre_email(haystack)
+    score = sum(2 for keyword in MOTS_CLES_BTP_FORTS if keyword in normalized)
+    score += sum(1 for keyword in MOTS_CLES_BTP_FAIBLES if keyword in normalized)
+    return score
 
 
 def _filtrer_emails_btp(documents: list, projet: str = "non_defini") -> list:
@@ -519,10 +578,10 @@ def _filtrer_emails_btp(documents: list, projet: str = "non_defini") -> list:
                 str(meta.get("email_subject", "")),
                 doc.page_content or "",
             ]
-        ).lower()
-        if not any(keyword.lower() in haystack for keyword in MOTS_CLES_BTP_EMAIL):
+        )
+        if _score_btp_email(haystack) < 2:
             continue
-        if filtrer_projet and projet_normalise not in haystack:
+        if filtrer_projet and _normaliser_filtre_email(projet_normalise) not in _normaliser_filtre_email(haystack):
             continue
         filtered.append(doc)
 
