@@ -28,6 +28,8 @@ import shutil
 import tempfile
 import time
 import uuid
+from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -41,7 +43,7 @@ from couche_data.dtu_normes_search import (
     list_dtu_normes,
     search_reglementaire_response,
 )
-from couche_data.vectorisation import stats_collection
+from couche_data.vectorisation import get_vectorstore, reinitialiser_collection, stats_collection
 from couche_ia.llm_engine import LLMEngine, documents_to_context_chunks
 from couche_ia.retriever import rechercher
 from couche_execution.workflows import (
@@ -72,6 +74,14 @@ if not any(isinstance(handler, logging.FileHandler) for handler in logger.handle
 _jobs: dict[str, dict] = {}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".bmp"}
 OAUTH_STATE_TTL_SECONDS = 15 * 60
+
+
+def _gmail_signed_auth_response(message: str = "Connexion Gmail requise.") -> dict:
+    code_verifier = _b64url_encode(secrets.token_bytes(64))
+    signed_state = _sign_oauth_state(code_verifier)
+    auth_data = generate_auth_url(state=signed_state, code_verifier=code_verifier)
+    auth_data.pop("code_verifier", None)
+    return {"need_auth": True, **auth_data, "message": message}
 
 
 def _b64url_encode(data: bytes) -> str:
@@ -122,6 +132,103 @@ def _verify_oauth_state(state: Optional[str]) -> Optional[str]:
     except Exception as exc:
         logger.warning("OAuth Gmail state introuvable ou invalide: %s", exc)
         return None
+
+
+def _first_metadata_value(meta: dict, keys: list[str], default: str = "non_defini") -> str:
+    for key in keys:
+        value = meta.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return default
+
+
+def _normalize_file_type(meta: dict) -> str:
+    raw = _first_metadata_value(
+        meta,
+        ["type_document", "type_doc", "pipeline_utilise", "extension", "file_type"],
+        "knowledge",
+    )
+    lower = raw.lower()
+    if "dtu" in lower or "norme" in lower or "reglement" in lower:
+        return "DTU"
+    if "bim" in lower or "ifc" in lower:
+        return "BIM"
+    if "email" in lower or "gmail" in lower:
+        return "EMAIL"
+    if "pdf" in lower:
+        return "PDF"
+    if "image" in lower or lower in {"jpg", "jpeg", "png", "webp", "tif", "tiff", "bmp"}:
+        return "IMAGE"
+    return raw.upper() if raw else "knowledge"
+
+
+def _parse_ingestion_date(value: str) -> tuple[float, str]:
+    if not value:
+        return 0.0, ""
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            dt = datetime.strptime(value[:19], fmt)
+            return dt.timestamp(), dt.isoformat()
+        except Exception:
+            pass
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return dt.timestamp(), dt.isoformat()
+    except Exception:
+        return 0.0, value
+
+
+def _knowledge_documents_payload() -> dict:
+    vectorstore = get_vectorstore()
+    raw = vectorstore.get(include=["metadatas"])
+    metadatas = raw.get("metadatas", []) or []
+    grouped: dict[tuple[str, str, str, str, str, str], dict] = {}
+    latest_ts = 0.0
+    latest_value = ""
+
+    for meta in metadatas:
+        meta = meta or {}
+        source = _first_metadata_value(
+            meta,
+            ["source_fichier", "nom_fichier", "source", "gmail_id", "fichier"],
+            "source_inconnue",
+        )
+        project = _first_metadata_value(meta, ["projet", "project"], "non_defini")
+        lot = _first_metadata_value(meta, ["lot_technique", "lot"], "non_defini")
+        auteur = _first_metadata_value(meta, ["auteur", "author"], "inconnu")
+        criticite = _first_metadata_value(meta, ["criticite"], "normale")
+        file_type = _normalize_file_type(meta)
+        ingested_at = _first_metadata_value(meta, ["ingere_le", "ingested_at", "date"], "")
+        ts, normalized_date = _parse_ingestion_date(ingested_at)
+        if ts >= latest_ts and normalized_date:
+            latest_ts = ts
+            latest_value = normalized_date
+
+        key = (source, project, lot, auteur, criticite, file_type)
+        if key not in grouped:
+            grouped[key] = {
+                "source": source,
+                "project": project,
+                "lot": lot,
+                "auteur": auteur,
+                "criticite": criticite,
+                "file_type": file_type,
+                "ingested_at": normalized_date or ingested_at,
+                "chunk_count": 0,
+            }
+        grouped[key]["chunk_count"] += 1
+        current_ts, _ = _parse_ingestion_date(grouped[key].get("ingested_at", ""))
+        if ts >= current_ts and (normalized_date or ingested_at):
+            grouped[key]["ingested_at"] = normalized_date or ingested_at
+
+    documents = sorted(grouped.values(), key=lambda item: item.get("ingested_at", ""), reverse=True)
+    return {
+        "total_chunks": len(metadatas),
+        "total_documents": len(documents),
+        "vector_store": "chroma",
+        "derniere_ingestion": latest_value,
+        "documents": documents,
+    }
 
 
 def _traiter_image_background(
@@ -222,11 +329,7 @@ async def gmail_login():
     try:
         if has_valid_gmail_token():
             return {"need_auth": False, "message": "Gmail deja connecte."}
-        code_verifier = _b64url_encode(secrets.token_bytes(64))
-        signed_state = _sign_oauth_state(code_verifier)
-        auth_data = generate_auth_url(state=signed_state, code_verifier=code_verifier)
-        auth_data.pop("code_verifier", None)
-        return {"need_auth": True, **auth_data}
+        return _gmail_signed_auth_response()
     except FileNotFoundError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -380,6 +483,23 @@ async def statut_job(job_id: str):
     return {"job_id": job_id, **job}
 
 
+@router.get("/knowledge/documents", summary="Lister les documents presents dans la base vectorielle")
+async def knowledge_documents():
+    try:
+        return _knowledge_documents_payload()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/knowledge/documents", summary="Vider la base vectorielle")
+async def clear_knowledge_documents():
+    try:
+        reinitialiser_collection()
+        return {"statut": "succès", "message": "Base vectorielle vidée.", "stats_collection": stats_collection()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/ingerer/texte", summary="Ingérer un texte brut (email, WhatsApp, note)")
 async def ingerer_texte(body: TexteIngestionRequest):
     """Ingest d'un texte brut avec métadonnées BTP."""
@@ -422,7 +542,7 @@ async def ingerer_gmail_route(body: GmailIngestionRequest):
             criticite=body.criticite,
         )
         if result.get("need_auth"):
-            _remember_pkce_verifier(result)
+            return _gmail_signed_auth_response(result.get("message", "Connexion Gmail requise avant l'ingestion."))
         return result
     except FileNotFoundError as e:
         raise HTTPException(status_code=400, detail=str(e))

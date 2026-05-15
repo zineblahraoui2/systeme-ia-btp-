@@ -8,6 +8,11 @@ import streamlit as st
 
 import config
 
+try:
+    import plotly.express as px
+except ImportError:
+    px = None
+
 
 API_URL = config.BACKEND_URL
 DEFAULT_API_URL = API_URL
@@ -18,6 +23,35 @@ st.set_page_config(
     page_title="Système IA BTP",
     page_icon="🏗️",
     layout="wide",
+)
+
+
+st.markdown(
+    """
+<style>
+.main-header { color: #1e3a5f; font-size: 2rem; font-weight: 800; margin-bottom: 0.15rem; }
+.main-subtitle { color: #6c757d; font-size: 0.98rem; margin-bottom: 0.75rem; }
+.header-rule { height: 3px; width: 100%; background: linear-gradient(90deg, #1e3a5f, #2ecc71, #e67e22); border-radius: 4px; margin: 0.5rem 0 1.4rem 0; }
+.section-title { color: #1e3a5f; font-weight: 750; margin-top: 0.6rem; }
+.section-title:after { content: ""; display: block; width: 52px; height: 3px; background: #2ecc71; border-radius: 2px; margin-top: 6px; }
+.answer-box { background: #f8f9fa; border-left: 4px solid #2ecc71; border-radius: 8px; padding: 16px; margin-top: 12px; }
+.api-online { color: #2ecc71; font-weight: 700; }
+.api-offline { color: #e74c3c; font-weight: 700; }
+.stTabs [data-baseweb="tab-list"] { gap: 8px; }
+.stTabs [data-baseweb="tab"] { color: #495057; border-bottom: 2px solid transparent; transition: all 0.2s; }
+.stTabs [aria-selected="true"] { color: #1e3a5f !important; border-bottom: 3px solid #1e3a5f; font-weight: 700; }
+.stTabs [data-baseweb="tab"]:hover { color: #1e3a5f; background: rgba(30,58,95,0.05); }
+.stButton > button { border-radius: 8px; font-weight: 600; transition: all 0.2s; }
+.stButton > button:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+.stTextInput > div > div > input, .stTextArea > div > div > textarea { border-radius: 6px; border: 1px solid #dee2e6; }
+.stTextInput > div > div > input:focus, .stTextArea > div > div > textarea:focus { border-color: #1e3a5f; box-shadow: 0 0 0 2px rgba(30,58,95,0.1); }
+[data-testid="metric-container"] { background: white; border-left: 4px solid #1e3a5f; border-radius: 8px; padding: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+[data-testid="stSidebar"] { background: #f8f9fa; }
+[data-testid="stSidebar"] .stTextInput input { border-radius: 8px; }
+.badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: 600; color: white; }
+</style>
+""",
+    unsafe_allow_html=True,
 )
 
 
@@ -61,6 +95,50 @@ def show_response(response: requests.Response) -> None:
     else:
         st.error(f"Erreur {response.status_code}")
         st.json(data)
+
+
+def render_markdown_response(data: dict) -> None:
+    answer = data.get("reponse", data)
+    if isinstance(answer, (dict, list)):
+        import json
+
+        content = f"```json\n{json.dumps(answer, ensure_ascii=False, indent=2)}\n```"
+    else:
+        content = str(answer)
+    st.markdown("<div class='answer-box'>", unsafe_allow_html=True)
+    st.markdown(content)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _html_badge(value: str, color: str) -> str:
+    return f"<span class='badge' style='background:{color}'>{value}</span>"
+
+
+def _badge_color(kind: str, value: str) -> str:
+    normalized = (value or "").strip().lower()
+    if kind == "criticite":
+        colors = {
+            "critique": "#e74c3c",
+            "élevée": "#e67e22",
+            "elevee": "#e67e22",
+            "haute": "#f39c12",
+            "normale": "#2ecc71",
+        }
+        return colors.get(normalized, "#7f8c8d")
+    colors = {
+        "DTU": "#2c3e50",
+        "BIM": "#8e44ad",
+        "EMAIL": "#16a085",
+        "PDF": "#c0392b",
+        "IMAGE": "#27ae60",
+        "KNOWLEDGE": "#3498db",
+    }
+    return colors.get((value or "").upper(), "#3498db")
+
+
+def _truncate(value: str, limit: int = 40) -> str:
+    value = str(value or "")
+    return value if len(value) <= limit else value[: limit - 1] + "…"
 
 
 def show_pipeline_badge(pipeline: str | None) -> None:
@@ -130,11 +208,15 @@ def poll_job(job_id: str, fichier_nom: str) -> None:
     st.warning("L'analyse continue en arriere-plan. Consulte les stats ou relance plus tard.")
 
 
-st.title("Système IA BTP")
-st.caption("Interface de test pour ingestion, recherche, conformité, risques et recommandations.")
+st.markdown("<div class='main-header'>🏗️ Système IA BTP</div>", unsafe_allow_html=True)
+st.markdown(
+    "<div class='main-subtitle'>Interface IA pour ingestion, recherche, conformité, risques et recommandations chantier.</div>",
+    unsafe_allow_html=True,
+)
+st.markdown("<div class='header-rule'></div>", unsafe_allow_html=True)
 
 with st.sidebar:
-    st.header("Connexion API")
+    st.header("🔌 Connexion API")
     current_api_url = st.session_state.get("api_base_url", "")
     if current_api_url and current_api_url != DEFAULT_API_URL and "localhost" in current_api_url:
         st.session_state.api_base_url = DEFAULT_API_URL
@@ -143,6 +225,13 @@ with st.sidebar:
         value=st.session_state.get("api_base_url", DEFAULT_API_URL),
     )
     sync_gmail_status(force=True)
+    try:
+        api_status = requests.get(api_url("/health"), timeout=8).ok
+    except requests.RequestException:
+        api_status = False
+    status_class = "api-online" if api_status else "api-offline"
+    status_text = "● Online" if api_status else "● Offline"
+    st.markdown(f"<span class='{status_class}'>{status_text}</span>", unsafe_allow_html=True)
 
     if st.button("Tester /health", use_container_width=True):
         try:
@@ -156,8 +245,8 @@ with st.sidebar:
     st.code(f"py -m uvicorn main:app --reload --port {config.API_PORT}")
 
 
-tab_chat, tab_ingest, tab_reglementaire, tab_analysis, tab_admin = st.tabs(
-    ["Question", "Ingestion", "Base Réglementaire", "Analyse", "Admin"]
+tab_chat, tab_ingest, tab_reglementaire, tab_analysis, tab_knowledge, tab_admin = st.tabs(
+    ["Question", "Ingestion", "Base Réglementaire", "Analyse", "🗄️ Knowledge", "Admin"]
 )
 
 
@@ -181,7 +270,11 @@ with tab_chat:
             payload = {"question": question, "projet": projet or None, "k": int(k)}
             try:
                 response = requests.post(api_url("/question"), json=payload, timeout=API_TIMEOUT_SECONDS)
-                show_response(response)
+                if response.ok:
+                    st.success("Requête réussie")
+                    render_markdown_response(response.json())
+                else:
+                    show_response(response)
             except requests.RequestException as exc:
                 st.error(f"Erreur API : {exc}")
 
@@ -477,6 +570,98 @@ with tab_analysis:
                 show_response(response)
             except requests.RequestException as exc:
                 st.error(f"Erreur API : {exc}")
+
+
+with tab_knowledge:
+    st.markdown("<div class='section-title'>Knowledge Base</div>", unsafe_allow_html=True)
+    try:
+        response = requests.get(api_url("/knowledge/documents"), timeout=API_TIMEOUT_SECONDS)
+        response.raise_for_status()
+        knowledge = response.json()
+    except requests.RequestException as exc:
+        st.error(f"Erreur API : {exc}")
+        knowledge = {"total_chunks": 0, "total_documents": 0, "vector_store": "chroma", "derniere_ingestion": "", "documents": []}
+
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("📦 Chunks total", knowledge.get("total_chunks", 0))
+    metric_cols[1].metric("📄 Documents total", knowledge.get("total_documents", 0))
+    metric_cols[2].metric("🗄️ Vector Store", knowledge.get("vector_store", "chroma"))
+    metric_cols[3].metric("🕐 Dernière ingestion", knowledge.get("derniere_ingestion") or "-")
+
+    documents = knowledge.get("documents", []) or []
+    filter_cols = st.columns(4)
+    criticites = sorted({doc.get("criticite", "") for doc in documents if doc.get("criticite")})
+    file_types = sorted({doc.get("file_type", "") for doc in documents if doc.get("file_type")})
+    projects = sorted({doc.get("project", "") for doc in documents if doc.get("project")})
+    with filter_cols[0]:
+        selected_criticites = st.multiselect("Criticité", criticites)
+    with filter_cols[1]:
+        selected_types = st.multiselect("File type", file_types)
+    with filter_cols[2]:
+        selected_projects = st.multiselect("Projet", projects)
+    with filter_cols[3]:
+        source_query = st.text_input("Recherche source")
+
+    filtered_docs = []
+    for doc in documents:
+        if selected_criticites and doc.get("criticite") not in selected_criticites:
+            continue
+        if selected_types and doc.get("file_type") not in selected_types:
+            continue
+        if selected_projects and doc.get("project") not in selected_projects:
+            continue
+        if source_query and source_query.lower() not in str(doc.get("source", "")).lower():
+            continue
+        filtered_docs.append(doc)
+
+    rows = []
+    for doc in filtered_docs:
+        criticite = doc.get("criticite", "normale")
+        file_type = doc.get("file_type", "knowledge")
+        rows.append(
+            {
+                "source": _truncate(doc.get("source", ""), 40),
+                "project": doc.get("project", ""),
+                "lot": doc.get("lot", ""),
+                "auteur": doc.get("auteur", ""),
+                "criticite": _html_badge(criticite, _badge_color("criticite", criticite)),
+                "file_type": _html_badge(file_type, _badge_color("file_type", file_type)),
+                "ingested_at": doc.get("ingested_at", ""),
+                "chunk_count": doc.get("chunk_count", 0),
+            }
+        )
+    if rows:
+        import pandas as pd
+
+        st.markdown(pd.DataFrame(rows).to_html(escape=False, index=False), unsafe_allow_html=True)
+    else:
+        st.info("Aucun document ne correspond aux filtres.")
+
+    if filtered_docs and px is not None:
+        import pandas as pd
+
+        chart_df = pd.DataFrame(filtered_docs)
+        graph_cols = st.columns(2)
+        with graph_cols[0]:
+            file_counts = chart_df.groupby("file_type", as_index=False)["chunk_count"].sum()
+            st.plotly_chart(px.pie(file_counts, names="file_type", values="chunk_count", title="Répartition par file_type"), use_container_width=True)
+        with graph_cols[1]:
+            project_chunks = chart_df.groupby("project", as_index=False)["chunk_count"].sum().sort_values("chunk_count")
+            st.plotly_chart(px.bar(project_chunks, x="chunk_count", y="project", orientation="h", title="Chunks par projet"), use_container_width=True)
+    elif px is None:
+        st.warning("Plotly n'est pas installé. Ajoute plotly puis redéploie.")
+
+    st.divider()
+    st.warning("Action irréversible : cette action vide toute la collection ChromaDB.")
+    confirm_clear = st.checkbox("Je confirme vouloir vider la base vectorielle", key="confirm_clear_knowledge")
+    if st.button("🗑️ Vider la base", disabled=not confirm_clear):
+        try:
+            delete_response = requests.delete(api_url("/knowledge/documents"), timeout=API_TIMEOUT_SECONDS)
+            show_response(delete_response)
+            if delete_response.ok:
+                st.rerun()
+        except requests.RequestException as exc:
+            st.error(f"Erreur API : {exc}")
 
 
 with tab_admin:
