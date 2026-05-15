@@ -30,6 +30,7 @@ from config import get_settings
 
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 logger = logging.getLogger(__name__)
+_runtime_gmail_token: Optional[str] = None
 
 
 def _base64url_no_padding(data: bytes) -> str:
@@ -50,6 +51,11 @@ def _load_token_from_env(token_json: str) -> Optional[Credentials]:
         return None
 
 
+def _current_gmail_token() -> Optional[str]:
+    settings = get_settings()
+    return os.getenv("GMAIL_TOKEN") or _runtime_gmail_token or settings.gmail_token
+
+
 def _load_client_config_from_env(credentials_json: str) -> Optional[dict]:
     try:
         client_config = json.loads(credentials_json)
@@ -64,8 +70,10 @@ def _load_client_config_from_env(credentials_json: str) -> Optional[dict]:
 
 
 def _save_gmail_token(creds: Credentials, token_path: Path) -> None:
+    global _runtime_gmail_token
     settings = get_settings()
     token_json = creds.to_json()
+    _runtime_gmail_token = token_json
     if settings.is_railway:
         os.environ["GMAIL_TOKEN"] = token_json
         logger.warning(
@@ -113,9 +121,10 @@ def get_valid_gmail_credentials() -> Optional[Credentials]:
     settings = get_settings()
     _, token_path = _credentials_paths()
     creds: Optional[Credentials] = None
+    gmail_token = _current_gmail_token()
 
-    if settings.gmail_token:
-        creds = _load_token_from_env(settings.gmail_token)
+    if gmail_token:
+        creds = _load_token_from_env(gmail_token)
     elif token_path.exists():
         try:
             creds = Credentials.from_authorized_user_file(str(token_path), GMAIL_SCOPES)
