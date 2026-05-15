@@ -86,7 +86,12 @@ def extract_dtu_catalogue(text: str) -> list[dict]:
     Extrait la liste structuree des DTU depuis un document de type catalogue/index.
     Retourne une liste de dicts, un par DTU reference.
     """
-    pattern = r"((?:NF|XP|FD)\s+DTU\s+[\d.]+\*?)\s+([^\n(]{5,}?)(?:\s*\(([^)]+)\))?\s*$"
+    patterns = [
+        # FFB/BNTEC catalogue: "NF DTU 25.1 Enduits interieurs en platre (P71-201)"
+        r"\b((?:(?:NF|XP|FD)\s+)?DTU\s+(\d+(?:\.\d+)*\*?))\s+(.+?)(?:\s*\(([A-Z]{0,3}\s?\d{1,3}[-–]\d{1,4}(?:[-–]\d+)?)\))?\s*$",
+        # Legacy format with a full NF/XP/FD DTU prefix.
+        r"\b((?:NF|XP|FD)\s+DTU\s+([\d.]+\*?))\s+([^\n(]{5,}?)(?:\s*\(([^)]+)\))?\s*$",
+    ]
     results: list[dict] = []
     current_domain = "Général"
     seen_normes: set[str] = set()
@@ -109,7 +114,11 @@ def extract_dtu_catalogue(text: str) -> list[dict]:
         ):
             current_domain = line
 
-        match = re.search(pattern, line, re.MULTILINE)
+        match = None
+        for pattern in patterns:
+            match = re.search(pattern, line, re.MULTILINE | re.IGNORECASE)
+            if match:
+                break
         if not match:
             continue
 
@@ -118,8 +127,8 @@ def extract_dtu_catalogue(text: str) -> list[dict]:
             continue
         seen_normes.add(norme)
 
-        titre = match.group(2).strip()
-        ref_nf = match.group(3).strip() if match.group(3) else ""
+        titre = match.group(3).strip(" -–:")
+        ref_nf = match.group(4).strip() if len(match.groups()) >= 4 and match.group(4) else ""
         results.append(
             {
                 "norme": norme,
@@ -231,6 +240,83 @@ def ingest_dtu_catalogue_to_chroma(
         )
 
     return len(documents)
+
+
+def _documents_catalogue_fallback(
+    pages: list[tuple[int, str]],
+    fichier_path: str,
+    ocr_utilise: bool,
+    projet: str = "reglementaire",
+    lot_technique: str = "reglementation",
+    criticite: str = "haute",
+    auteur: str = "inconnu",
+) -> tuple[list[Document], dict]:
+    """
+    Fallback anti-blocage : si un catalogue DTU est detecte mais non parse,
+    on l'indexe quand meme comme document texte exploitable.
+    """
+    documents: list[Document] = []
+    source_name = Path(fichier_path).name
+    ingested_at = datetime.today().strftime("%Y-%m-%d %H:%M:%S")
+
+    for page, texte in pages:
+        text = (texte or "").strip()
+        if not text:
+            continue
+        for index, start in enumerate(range(0, len(text), 3500), start=1):
+            chunk_text = text[start : start + 3500].strip()
+            if not chunk_text:
+                continue
+            metadata = {
+                "type_document": "dtu_catalogue",
+                "type_doc": "catalogue_index",
+                "numero_dtu": "Catalogue DTU",
+                "titre": source_name,
+                "domaine": "catalogue",
+                "criticite": criticite,
+                "source": "externe_reglementaire",
+                "source_fichier": source_name,
+                "obligatoire": False,
+                "type_prescription": "reference_catalogue",
+                "article": CATALOGUE_ARTICLE_SECTION,
+                "section": CATALOGUE_ARTICLE_SECTION,
+                "page": int(page),
+                "date_norme": "Non trouve",
+                "version_norme": "Non trouve",
+                "organisme": "BNTEC/FFB",
+                "niveau_application": "national",
+                "score_confiance": 0.75,
+                "projet": projet,
+                "lot_technique": lot_technique,
+                "auteur": auteur,
+                "nom_fichier": source_name,
+                "chunk_reglementaire": f"fallback-{page}-{index}",
+                "is_table": False,
+                "ocr_utilise": ocr_utilise,
+                "ingere_le": ingested_at,
+            }
+            content = (
+                "Type document: Catalogue DTU brut\n"
+                f"Source: {source_name}\n"
+                f"Page: {page}\n"
+                "Note: catalogue detecte mais entrees DTU non parsees automatiquement.\n"
+                f"Texte catalogue:\n{chunk_text}"
+            )
+            documents.append(Document(page_content=content, metadata=metadata))
+
+    summary = {
+        "nom": "Catalogue DTU",
+        "titre": source_name,
+        "domaine": "catalogue",
+        "type_document": "dtu_catalogue",
+        "type_doc": "catalogue_index",
+        "chunks": len(documents),
+        "fallback": "texte_catalogue",
+        "ocr_utilise": ocr_utilise,
+        "organisme": "BNTEC/FFB",
+        "date_norme": "Non trouve",
+    }
+    return documents, summary
 
 
 def _extraire_pdf_texte(fichier_path: str) -> list[tuple[int, str]]:
@@ -506,12 +592,41 @@ def ingerer_dtu_norme_pdf(
         entries = extract_dtu_catalogue(total_text)
         logger.info("DTU ingestion: catalogue entries=%s fichier=%s", len(entries), Path(fichier_path).name)
         if not entries:
+            logger.warning(
+                "Catalogue DTU detecte sans entree parseable. Fallback texte brut. fichier=%s apercu=%r",
+                Path(fichier_path).name,
+                total_text[:1000],
+            )
+            fallback_docs, summary = _documents_catalogue_fallback(
+                pages,
+                fichier_path,
+                ocr_utilise,
+                projet=projet,
+                lot_technique=lot_technique,
+                criticite=criticite,
+                auteur=auteur,
+            )
+            if not fallback_docs:
+                return {
+                    "statut": "erreur",
+                    "status": "error",
+                    "doc_type": "catalogue_index",
+                    "message": "Catalogue DTU detecte mais aucun texte exploitable n'a ete extrait.",
+                    "fichier": Path(fichier_path).name,
+                }
+            indexer(fallback_docs)
             return {
-                "statut": "erreur",
-                "status": "error",
-                "doc_type": "catalogue_index",
-                "message": "Catalogue DTU detecte mais aucune entree DTU exploitable n'a ete extraite.",
+                "statut": "succès",
+                "status": "success",
+                "pipeline_utilise": "dtu_norme",
                 "fichier": Path(fichier_path).name,
+                "doc_type": "catalogue_index",
+                "documents_ingeres": len(fallback_docs),
+                "dtus_ingeres": 0,
+                "fallback": "dtu_catalogue",
+                "message": "Catalogue DTU detecte. Aucune entree structuree parsee, PDF ingere comme texte catalogue exploitable.",
+                "resume_reglementaire": summary,
+                "stats_collection": stats_collection(),
             }
 
         count = ingest_dtu_catalogue_to_chroma(
@@ -582,6 +697,31 @@ def ingest_regulatory_document(file_path: str, collection=None) -> dict:
 
     if doc_type == "catalogue_index":
         entries = extract_dtu_catalogue(total_text)
+        if not entries:
+            logger.warning(
+                "DTU ingestion: orchestration catalogue sans entree. Fallback texte brut fichier=%s apercu=%r",
+                source_filename,
+                total_text[:1000],
+            )
+            fallback_docs, summary = _documents_catalogue_fallback(pages, file_path, ocr_utilise)
+            if not fallback_docs:
+                return {
+                    "status": "error",
+                    "statut": "erreur",
+                    "doc_type": "catalogue_index",
+                    "message": "Catalogue DTU detecte mais aucun texte exploitable n'a ete extrait.",
+                }
+            indexer(fallback_docs)
+            return {
+                "status": "success",
+                "statut": "succès",
+                "doc_type": "catalogue_index",
+                "documents_ingeres": len(fallback_docs),
+                "dtus_ingeres": 0,
+                "fallback": "dtu_catalogue",
+                "message": "Catalogue DTU detecte. PDF ingere comme texte catalogue exploitable.",
+                "resume_reglementaire": summary,
+            }
         count = ingest_dtu_catalogue_to_chroma(
             dtu_entries=entries,
             collection=collection or get_vectorstore(),
