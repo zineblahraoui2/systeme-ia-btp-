@@ -11,10 +11,16 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import imaplib
 import json
 import logging
 import os
 import secrets
+import ssl
+from datetime import datetime, timedelta
+from email import message_from_bytes
+from email.header import decode_header, make_header
+from email.message import Message
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Optional
@@ -221,6 +227,24 @@ def _headers_to_dict(headers: list[dict]) -> dict[str, str]:
     return {h.get("name", "").lower(): h.get("value", "") for h in headers}
 
 
+def _decode_mime_header(value: str) -> str:
+    if not value:
+        return ""
+    try:
+        return str(make_header(decode_header(value)))
+    except Exception:
+        return value
+
+
+def _strip_html(text: str) -> str:
+    import re
+
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
+    text = re.sub(r"</p\s*>", "\n", text, flags=re.I)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return text
+
+
 def _extract_text_from_payload(payload: dict) -> str:
     mime_type = payload.get("mimeType", "")
     body_data = payload.get("body", {}).get("data")
@@ -228,12 +252,7 @@ def _extract_text_from_payload(payload: dict) -> str:
     if body_data and mime_type in {"text/plain", "text/html"}:
         text = _decode_base64url(body_data)
         if mime_type == "text/html":
-            # Nettoyage HTML leger sans dependance supplementaire.
-            import re
-
-            text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
-            text = re.sub(r"</p\s*>", "\n", text, flags=re.I)
-            text = re.sub(r"<[^>]+>", " ", text)
+            text = _strip_html(text)
         return text
 
     parts = payload.get("parts", []) or []
@@ -329,4 +348,119 @@ def collecter_gmail(
         )
 
     print(f"[gmail] {len(documents)} emails collectes avec la requete '{query}'")
+    return documents
+
+
+def _extract_text_from_email_message(message: Message) -> str:
+    parts: list[str] = []
+    if message.is_multipart():
+        for part in message.walk():
+            content_type = part.get_content_type()
+            disposition = str(part.get("Content-Disposition", "")).lower()
+            if "attachment" in disposition or content_type not in {"text/plain", "text/html"}:
+                continue
+            payload = part.get_payload(decode=True)
+            if not payload:
+                continue
+            charset = part.get_content_charset() or "utf-8"
+            text = payload.decode(charset, errors="replace")
+            parts.append(_strip_html(text) if content_type == "text/html" else text)
+    else:
+        payload = message.get_payload(decode=True)
+        if payload:
+            charset = message.get_content_charset() or "utf-8"
+            text = payload.decode(charset, errors="replace")
+            parts.append(_strip_html(text) if message.get_content_type() == "text/html" else text)
+    return "\n\n".join(part.strip() for part in parts if part.strip())
+
+
+def collecter_imap(
+    host: str,
+    port: int,
+    email_address: str,
+    password: str,
+    folder: str = "INBOX",
+    days: int = 30,
+    max_results: int = 20,
+    use_ssl: bool = True,
+    projet: str = "non_defini",
+    lot_technique: str = "non_defini",
+    criticite: str = "normale",
+) -> list[Document]:
+    """
+    Recupere des emails via IMAP et les convertit en Documents.
+    Utile pour tester sans OAuth avec un mot de passe d'application.
+    """
+    since = (datetime.utcnow() - timedelta(days=max(1, days))).strftime("%d-%b-%Y")
+    if use_ssl:
+        mail = imaplib.IMAP4_SSL(host, port, ssl_context=ssl.create_default_context())
+    else:
+        mail = imaplib.IMAP4(host, port)
+
+    try:
+        mail.login(email_address, password)
+        status, _ = mail.select(folder)
+        if status != "OK":
+            raise RuntimeError(f"Dossier IMAP introuvable: {folder}")
+
+        status, data = mail.search(None, "SINCE", since)
+        if status != "OK":
+            raise RuntimeError("Recherche IMAP impossible.")
+
+        message_ids = (data[0] or b"").split()
+        message_ids = list(reversed(message_ids))[: max(1, max_results)]
+        documents: list[Document] = []
+
+        for message_id in message_ids:
+            status, fetched = mail.fetch(message_id, "(RFC822)")
+            if status != "OK" or not fetched:
+                continue
+            raw_email = next((item[1] for item in fetched if isinstance(item, tuple)), None)
+            if not raw_email:
+                continue
+
+            parsed = message_from_bytes(raw_email)
+            headers = {
+                "from": _decode_mime_header(parsed.get("From", "")),
+                "to": _decode_mime_header(parsed.get("To", "")),
+                "date": parsed.get("Date", ""),
+                "subject": _decode_mime_header(parsed.get("Subject", "")),
+            }
+            body = _extract_text_from_email_message(parsed)
+            content = _format_email_content(headers, body)
+
+            date_value = headers.get("date", "")
+            try:
+                parsed_date = parsedate_to_datetime(date_value).date().isoformat()
+            except Exception:
+                parsed_date = ""
+
+            imap_uid = f"{email_address}:{folder}:{message_id.decode('ascii', errors='ignore')}"
+            documents.append(
+                Document(
+                    page_content=content,
+                    metadata={
+                        "source": f"imap:{hashlib.md5(imap_uid.encode('utf-8')).hexdigest()}",
+                        "email_source_id": imap_uid,
+                        "provider": "imap",
+                        "projet": projet,
+                        "lot_technique": lot_technique,
+                        "type_document": "email",
+                        "auteur": headers.get("from", "inconnu"),
+                        "criticite": criticite,
+                        "date": parsed_date,
+                        "email_from": headers.get("from", ""),
+                        "email_to": headers.get("to", ""),
+                        "email_subject": headers.get("subject", ""),
+                        "imap_folder": folder,
+                    },
+                )
+            )
+    finally:
+        try:
+            mail.logout()
+        except Exception:
+            pass
+
+    print(f"[imap] {len(documents)} emails collectes depuis {email_address}/{folder}")
     return documents

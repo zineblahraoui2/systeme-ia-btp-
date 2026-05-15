@@ -93,8 +93,12 @@ def show_response(response: requests.Response) -> None:
         st.text(response.text)
         return
 
-    if response.ok:
+    statut = str(data.get("statut", "")).lower() if isinstance(data, dict) else ""
+    if response.ok and statut not in {"erreur", "error"}:
         st.success("Requête réussie")
+        st.json(data)
+    elif response.ok:
+        st.warning(data.get("message", "La requete a abouti, mais aucun email n'a ete ingere."))
         st.json(data)
     else:
         st.error(f"Erreur {response.status_code}")
@@ -491,20 +495,24 @@ with tab_ingest:
     gmail_connected = sync_gmail_status(force=True)
     gmail_status = st.session_state.get("gmail_status", {})
     providers = gmail_status.get("providers_configures", [])
+    if "imap" not in providers:
+        providers = [*providers, "imap"]
     providers_label = ", ".join(providers) if providers else "aucun"
     st.info(f"Providers configures: {providers_label}")
     provider_col, connect_col = st.columns([2, 1])
     with provider_col:
-        email_provider = st.selectbox("Provider", ["gmail"], key="email_provider")
+        email_provider = st.selectbox("Provider", ["gmail", "imap"], key="email_provider")
     with connect_col:
-        if gmail_connected:
+        if email_provider == "imap":
+            st.info("IMAP test")
+        elif gmail_connected:
             st.success("Gmail connecte")
         else:
             st.warning("Gmail non connecte")
 
-    if not gmail_status.get("credentials_configured") and not gmail_connected:
+    if email_provider == "gmail" and not gmail_status.get("credentials_configured") and not gmail_connected:
         st.warning("Configure d'abord les credentials OAuth Gmail: credentials.json en local ou GMAIL_CREDENTIALS en production.")
-    else:
+    elif email_provider == "gmail":
         if st.button("Configurer email", key="configure_gmail"):
             try:
                 auth_response = requests.get(auth_url("/auth/gmail/login"), timeout=API_TIMEOUT_SECONDS)
@@ -523,9 +531,27 @@ with tab_ingest:
         "newer_than:30d (BTP OR chantier OR travaux OR beton OR fondation "
         "OR lot OR retard OR livraison OR fournisseur OR maconnerie OR gros_oeuvre)"
     )
+    if email_provider == "imap":
+        st.caption("Pour Gmail/Outlook/Yahoo, utilise un mot de passe d'application. Le mot de passe n'est pas stocke.")
+        account_cols = st.columns([2, 1, 1])
+        with account_cols[0]:
+            imap_email = st.text_input("Adresse email", key="imap_email")
+        with account_cols[1]:
+            imap_host = st.text_input("Serveur IMAP", value="imap.gmail.com", key="imap_host")
+        with account_cols[2]:
+            imap_port = st.number_input("Port", min_value=1, max_value=65535, value=993, key="imap_port")
+        imap_password = st.text_input("Mot de passe / app password", type="password", key="imap_password")
+        imap_use_ssl = st.checkbox("SSL", value=True, key="imap_ssl")
+
     mail_cols = st.columns(3)
     with mail_cols[0]:
-        st.text_input("Dossier IMAP", value="INBOX", disabled=True, help="Gmail OAuth lit la boite via l'API Gmail.")
+        email_folder = st.text_input(
+            "Dossier IMAP",
+            value="INBOX",
+            disabled=email_provider == "gmail",
+            help="Gmail OAuth lit la boite via l'API Gmail. En IMAP, INBOX convient dans la plupart des cas.",
+            key="email_folder",
+        )
     with mail_cols[1]:
         gmail_days = st.number_input("Jours a remonter", min_value=1, max_value=365, value=30, key="gmail_days")
     with mail_cols[2]:
@@ -550,11 +576,37 @@ with tab_ingest:
 
     gmail_filtrer_btp = st.checkbox(
         "Filtrer les emails non-BTP",
-        value=True,
+        value=email_provider == "gmail",
         help="Garde seulement les emails avec vocabulaire chantier/BTP et evite les newsletters.",
     )
 
-    if st.button("Importer les emails", disabled=email_provider != "gmail"):
+    if email_provider == "imap":
+        if st.button("Importer via IMAP"):
+            payload = {
+                "host": imap_host.strip(),
+                "port": int(imap_port),
+                "email_address": imap_email.strip(),
+                "password": imap_password,
+                "folder": email_folder.strip() or "INBOX",
+                "days": int(gmail_days),
+                "max_results": int(gmail_max_results),
+                "use_ssl": imap_use_ssl,
+                "projet": gmail_projet.strip() or "emails_btp",
+                "lot_technique": gmail_lot.strip() or "communication_chantier",
+                "criticite": gmail_criticite,
+                "filtrer_btp": gmail_filtrer_btp,
+            }
+            if not payload["email_address"] or not payload["password"]:
+                st.warning("Indique l'adresse email et le mot de passe d'application.")
+            else:
+                try:
+                    with st.spinner("Connexion IMAP et ingestion des emails..."):
+                        response = requests.post(api_url("/ingerer/imap"), json=payload, timeout=API_TIMEOUT_SECONDS)
+                    show_response(response)
+                except requests.RequestException as exc:
+                    st.error(f"Erreur API : {exc}")
+
+    if st.button("Importer les emails Gmail", disabled=email_provider != "gmail"):
         payload = {
             "query": gmail_query or None,
             "max_results": int(gmail_max_results),

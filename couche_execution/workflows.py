@@ -21,7 +21,7 @@ from couche_data.bim_collecte import extraire_bim_ifc
 from couche_data.collecte import collecter_depuis_fichier, charger_texte_brut, charger_dossier
 from couche_data.document_router import router_document
 from couche_data.dtu_normes_collecte import ingerer_dtu_norme_pdf
-from couche_data.gmail_collecte import collecter_gmail, generate_auth_url, has_valid_gmail_token
+from couche_data.gmail_collecte import collecter_gmail, collecter_imap, generate_auth_url, has_valid_gmail_token
 from couche_data.image_collecte import extraire_image_clip, extraire_image_ocr
 from couche_data.nettoyage import nettoyer
 from couche_data.pdf_collecte import extraire_pdf_ocr, extraire_pdf_texte
@@ -331,6 +331,112 @@ def ingerer_gmail(
     }
 
 
+def ingerer_imap(
+    host: str,
+    port: int,
+    email_address: str,
+    password: str,
+    folder: str = "INBOX",
+    days: int = 30,
+    max_results: int = 20,
+    use_ssl: bool = True,
+    projet: str = "non_defini",
+    lot_technique: str = "non_defini",
+    criticite: str = "normale",
+    filtrer_btp: bool = True,
+) -> dict:
+    """Workflow d'ingestion des emails via IMAP."""
+    print(f"\n[workflow] Ingestion IMAP | Compte : {email_address} | Dossier : {folder}")
+    projet_filtre = projet
+    projet = _normaliser_contexte_email(projet, "emails_btp")
+    lot_technique = _normaliser_contexte_email(lot_technique, "communication_chantier")
+    query = f"{folder} newer_than:{days}d"
+
+    docs = collecter_imap(
+        host=host,
+        port=port,
+        email_address=email_address,
+        password=password,
+        folder=folder,
+        days=days,
+        max_results=max_results,
+        use_ssl=use_ssl,
+        projet=projet,
+        lot_technique=lot_technique,
+        criticite=criticite,
+    )
+    if not docs:
+        return {"statut": "erreur", "source": "imap", "message": "Aucun email trouve pour cette requete."}
+    emails_trouves = len(docs)
+
+    if filtrer_btp:
+        docs = _filtrer_emails_btp(docs, projet=projet_filtre)
+    emails_filtres = len(docs)
+    emails_rejetes = emails_trouves - emails_filtres
+
+    if not docs:
+        return {
+            "statut": "erreur",
+            "source": "imap",
+            "projet": projet,
+            "query": query,
+            "emails_trouves": emails_trouves,
+            "emails_filtres": 0,
+            "emails_ingeres": 0,
+            "emails_rejetes": emails_rejetes,
+            "filtrer_btp": filtrer_btp,
+            "message": "Aucun email pertinent BTP apres filtrage. Decoche le filtre pour tester la connexion IMAP.",
+        }
+
+    docs, emails_deja_presents = _filtrer_emails_deja_ingeres(docs)
+    if not docs:
+        return {
+            "statut": "doublon",
+            "source": "imap",
+            "projet": projet,
+            "query": query,
+            "emails_trouves": emails_trouves,
+            "emails_filtres": emails_filtres,
+            "emails_ingeres": 0,
+            "emails_rejetes": emails_rejetes,
+            "emails_deja_presents": emails_deja_presents,
+            "filtrer_btp": filtrer_btp,
+            "message": "Tous les emails filtres sont deja presents dans la base.",
+            "stats_collection": stats_collection(),
+        }
+
+    docs = nettoyer(docs)
+    if not docs:
+        return {
+            "statut": "erreur",
+            "source": "imap",
+            "message": "Emails vides ou trop courts apres nettoyage.",
+            "emails_trouves": emails_trouves,
+            "emails_filtres": emails_filtres,
+            "emails_ingeres": 0,
+            "emails_rejetes": emails_rejetes,
+            "emails_deja_presents": emails_deja_presents,
+            "filtrer_btp": filtrer_btp,
+        }
+
+    vectoriser(docs)
+    stats = stats_collection()
+
+    return {
+        "statut": "succes",
+        "source": "imap",
+        "projet": projet,
+        "query": query,
+        "emails_trouves": emails_trouves,
+        "emails_filtres": emails_filtres,
+        "emails_ingeres": len(docs),
+        "emails_rejetes": emails_rejetes,
+        "emails_deja_presents": emails_deja_presents,
+        "filtrer_btp": filtrer_btp,
+        "stats_collection": stats,
+    }
+
+
 def _normaliser_contexte_email(value: str, default: str) -> str:
     normalized = (value or "").strip()
     if normalized.lower() in {"", "non_defini", "non_défini", "non défini"}:
@@ -347,12 +453,14 @@ def _filtrer_emails_deja_ingeres(documents: list) -> tuple[list, int]:
     nouveaux = []
     deja_presents = 0
     for doc in documents:
-        gmail_id = (doc.metadata or {}).get("gmail_id")
-        if not gmail_id:
+        meta = doc.metadata or {}
+        source = str(meta.get("source", ""))
+        email_source_id = meta.get("gmail_id") or meta.get("email_source_id") or source
+        if not email_source_id:
             nouveaux.append(doc)
             continue
         try:
-            raw = vectorstore.get(where={"gmail_id": {"$eq": str(gmail_id)}}, include=["metadatas"])
+            raw = vectorstore.get(where={"source": {"$eq": source}}, include=["metadatas"])
             if raw.get("ids"):
                 deja_presents += 1
                 continue
@@ -372,6 +480,9 @@ MOTS_CLES_BTP_EMAIL = [
     "lot", "planning chantier", "réception", "reception", "livraison",
     "conformité", "conformite", "sécurité chantier", "securite chantier",
     "mur", "dalle", "toiture", "façade", "facade", "ferraillage",
+    "ouvrage", "plan", "plans", "metre", "métré", "reunion chantier",
+    "réunion chantier", "intervention", "sous-traitant", "soustraitant",
+    "cps", "cctp", "pv", "reserve", "réserve", "approvisionnement",
 ]
 
 BLACKLIST_EMAIL_SENDERS = [

@@ -56,6 +56,7 @@ from couche_execution.workflows import (
     ingerer_texte_brut,
     ingerer_dossier,
     ingerer_gmail,
+    ingerer_imap,
     analyser_et_recommander,
     audit_projet,
     verifier_conformite_element,
@@ -371,6 +372,21 @@ class GmailIngestionRequest(BaseModel):
     filtrer_btp: bool = True
 
 
+class ImapIngestionRequest(BaseModel):
+    host: str
+    port: int = 993
+    email_address: str
+    password: str
+    folder: str = "INBOX"
+    days: int = 30
+    max_results: int = 20
+    use_ssl: bool = True
+    projet: str = "non_defini"
+    lot_technique: str = "non_defini"
+    criticite: str = "normale"
+    filtrer_btp: bool = True
+
+
 class DtuSearchRequest(BaseModel):
     query: str
     k: Optional[int] = 6
@@ -639,6 +655,28 @@ async def ingerer_gmail_route(body: GmailIngestionRequest):
 # ─────────────────────────────────────────────
 # Routes d'interrogation
 # ─────────────────────────────────────────────
+
+@router.post("/ingerer/imap", summary="Ingerer des emails depuis IMAP")
+async def ingerer_imap_route(body: ImapIngestionRequest):
+    """Ingest des emails via IMAP avec email + mot de passe d'application."""
+    try:
+        return ingerer_imap(
+            host=body.host,
+            port=body.port,
+            email_address=body.email_address,
+            password=body.password,
+            folder=body.folder,
+            days=body.days,
+            max_results=body.max_results,
+            use_ssl=body.use_ssl,
+            projet=body.projet,
+            lot_technique=body.lot_technique,
+            criticite=body.criticite,
+            filtrer_btp=body.filtrer_btp,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.post("/question", summary="Poser une question sur la base de connaissance BTP")
 async def poser_question(body: QuestionRequest):
