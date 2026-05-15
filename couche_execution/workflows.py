@@ -504,6 +504,8 @@ BLACKLIST_EMAIL_SENDERS = [
 def _filtrer_emails_btp(documents: list, projet: str = "non_defini") -> list:
     projet_normalise = (projet or "").strip().lower()
     filtrer_projet = projet_normalise not in {"", "non_defini", "non_défini", "non défini"}
+    if projet_normalise in {"emails_btp", "email_btp"}:
+        filtrer_projet = False
     filtered = []
 
     for doc in documents:
