@@ -25,7 +25,7 @@ from couche_data.gmail_collecte import collecter_gmail, generate_auth_url, has_v
 from couche_data.image_collecte import extraire_image_clip, extraire_image_ocr
 from couche_data.nettoyage import nettoyer
 from couche_data.pdf_collecte import extraire_pdf_ocr, extraire_pdf_texte
-from couche_data.vectorisation import vectoriser, stats_collection
+from couche_data.vectorisation import get_vectorstore, vectoriser, stats_collection
 from couche_ia.analyse_metier import repondre, verifier_conformite, detecter_risques, analyser_document
 from couche_execution.recommandations import (
     generer_recommandations,
@@ -241,6 +241,9 @@ def ingerer_gmail(
     Etapes : Gmail API -> nettoyage -> vectorisation.
     """
     print(f"\n[workflow] Ingestion Gmail | Projet : {projet} | Requete : {query}")
+    projet_filtre = projet
+    projet = _normaliser_contexte_email(projet, "emails_btp")
+    lot_technique = _normaliser_contexte_email(lot_technique, "communication_chantier")
 
     if not has_valid_gmail_token():
         auth_data = generate_auth_url()
@@ -262,7 +265,7 @@ def ingerer_gmail(
     emails_trouves = len(docs)
 
     if filtrer_btp:
-        docs = _filtrer_emails_btp(docs, projet=projet)
+        docs = _filtrer_emails_btp(docs, projet=projet_filtre)
     emails_filtres = len(docs)
     emails_rejetes = emails_trouves - emails_filtres
 
@@ -280,6 +283,23 @@ def ingerer_gmail(
             "message": "Aucun email pertinent BTP apres filtrage.",
         }
 
+    docs, emails_deja_presents = _filtrer_emails_deja_ingeres(docs)
+    if not docs:
+        return {
+            "statut": "doublon",
+            "source": "gmail",
+            "projet": projet,
+            "query": query,
+            "emails_trouves": emails_trouves,
+            "emails_filtres": emails_filtres,
+            "emails_ingeres": 0,
+            "emails_rejetes": emails_rejetes,
+            "emails_deja_presents": emails_deja_presents,
+            "filtrer_btp": filtrer_btp,
+            "message": "Tous les emails filtres sont deja presents dans la base.",
+            "stats_collection": stats_collection(),
+        }
+
     docs = nettoyer(docs)
     if not docs:
         return {
@@ -289,6 +309,7 @@ def ingerer_gmail(
             "emails_filtres": emails_filtres,
             "emails_ingeres": 0,
             "emails_rejetes": emails_rejetes,
+            "emails_deja_presents": emails_deja_presents,
             "filtrer_btp": filtrer_btp,
         }
 
@@ -304,9 +325,42 @@ def ingerer_gmail(
         "emails_filtres": emails_filtres,
         "emails_ingeres": len(docs),
         "emails_rejetes": emails_rejetes,
+        "emails_deja_presents": emails_deja_presents,
         "filtrer_btp": filtrer_btp,
         "stats_collection": stats,
     }
+
+
+def _normaliser_contexte_email(value: str, default: str) -> str:
+    normalized = (value or "").strip()
+    if normalized.lower() in {"", "non_defini", "non_défini", "non défini"}:
+        return default
+    return normalized
+
+
+def _filtrer_emails_deja_ingeres(documents: list) -> tuple[list, int]:
+    try:
+        vectorstore = get_vectorstore()
+    except Exception:
+        return documents, 0
+
+    nouveaux = []
+    deja_presents = 0
+    for doc in documents:
+        gmail_id = (doc.metadata or {}).get("gmail_id")
+        if not gmail_id:
+            nouveaux.append(doc)
+            continue
+        try:
+            raw = vectorstore.get(where={"gmail_id": {"$eq": str(gmail_id)}}, include=["metadatas"])
+            if raw.get("ids"):
+                deja_presents += 1
+                continue
+        except Exception:
+            nouveaux.append(doc)
+            continue
+        nouveaux.append(doc)
+    return nouveaux, deja_presents
 
 
 MOTS_CLES_BTP_EMAIL = [

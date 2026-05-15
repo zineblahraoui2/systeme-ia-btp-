@@ -35,7 +35,12 @@ from typing import Any, Optional
 from fastapi import APIRouter, BackgroundTasks, HTTPException, UploadFile, File, Form, Query
 from pydantic import BaseModel
 
-from couche_data.gmail_collecte import exchange_code_for_token, generate_auth_url, has_valid_gmail_token
+from couche_data.gmail_collecte import (
+    exchange_code_for_token,
+    generate_auth_url,
+    gmail_configuration_status,
+    has_valid_gmail_token,
+)
 from couche_data.dtu_normes_search import (
     check_conformity,
     is_reglementaire_query,
@@ -393,8 +398,10 @@ async def gmail_login():
 async def gmail_status():
     """Indique si un token Gmail valide existe cote backend."""
     try:
-        connected = has_valid_gmail_token()
+        status = gmail_configuration_status()
+        connected = bool(status.get("connected"))
         return {
+            **status,
             "connected": connected,
             "need_auth": not connected,
             "message": "Gmail connecte." if connected else "Connexion Gmail requise.",

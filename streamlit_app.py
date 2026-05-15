@@ -75,10 +75,13 @@ def sync_gmail_status(force: bool = False) -> bool:
         response = requests.get(auth_url("/auth/gmail/status"), timeout=API_TIMEOUT_SECONDS)
         if response.ok:
             data = response.json()
+            st.session_state.gmail_status = data
             st.session_state.gmail_connected = bool(data.get("connected"))
         else:
+            st.session_state.gmail_status = {}
             st.session_state.gmail_connected = False
     except requests.RequestException:
+        st.session_state.gmail_status = {}
         st.session_state.gmail_connected = False
     return bool(st.session_state.gmail_connected)
 
@@ -484,43 +487,79 @@ with tab_ingest:
                 st.error(f"Erreur API : {exc}")
 
     st.divider()
-    st.markdown("**Gmail**")
-    gmail_connected = sync_gmail_status()
-    if gmail_connected:
-        st.success("Gmail connectÃ©")
+    st.markdown("**Email**")
+    gmail_connected = sync_gmail_status(force=True)
+    gmail_status = st.session_state.get("gmail_status", {})
+    providers = gmail_status.get("providers_configures", [])
+    providers_label = ", ".join(providers) if providers else "aucun"
+    st.info(f"Providers configures: {providers_label}")
+    provider_col, connect_col = st.columns([2, 1])
+    with provider_col:
+        email_provider = st.selectbox("Provider", ["gmail"], key="email_provider")
+    with connect_col:
+        if gmail_connected:
+            st.success("Gmail connecte")
+        else:
+            st.warning("Gmail non connecte")
+
+    if not gmail_status.get("credentials_configured") and not gmail_connected:
+        st.warning("Configure d'abord les credentials OAuth Gmail: credentials.json en local ou GMAIL_CREDENTIALS en production.")
     else:
-        st.info("Gmail non connectÃ©")
+        if st.button("Configurer email", key="configure_gmail"):
+            try:
+                auth_response = requests.get(auth_url("/auth/gmail/login"), timeout=API_TIMEOUT_SECONDS)
+                auth_response.raise_for_status()
+                auth_data = auth_response.json()
+                if auth_data.get("need_auth"):
+                    st.session_state.gmail_connected = False
+                    st.warning("Connexion Gmail requise.")
+                    st.link_button("Connecter Gmail", auth_data["auth_url"])
+                else:
+                    st.session_state.gmail_connected = True
+                    st.success("Gmail deja connecte.")
+            except requests.RequestException as exc:
+                st.error(f"Erreur API : {exc}")
+    default_gmail_query = (
+        "newer_than:30d (BTP OR chantier OR travaux OR beton OR fondation "
+        "OR lot OR retard OR livraison OR fournisseur OR maconnerie OR gros_oeuvre)"
+    )
+    mail_cols = st.columns(3)
+    with mail_cols[0]:
+        st.text_input("Dossier IMAP", value="INBOX", disabled=True, help="Gmail OAuth lit la boite via l'API Gmail.")
+    with mail_cols[1]:
+        gmail_days = st.number_input("Jours a remonter", min_value=1, max_value=365, value=30, key="gmail_days")
+    with mail_cols[2]:
+        gmail_max_results = st.number_input("Max emails", min_value=1, max_value=100, value=20, key="gmail_max_results")
+
     gmail_query = st.text_input(
-        "Requête Gmail",
-        value="newer_than:30d (BTP OR chantier OR travaux OR béton OR fondation OR lot OR retard OR livraison OR fournisseur OR maçonnerie OR gros_oeuvre)",
+        "Requete Gmail",
+        value=default_gmail_query.replace("newer_than:30d", f"newer_than:{int(gmail_days)}d"),
         help="Exemples : newer_than:30d, from:client@example.com, subject:chantier",
     )
-    gmail_max_results = st.number_input(
-        "Nombre d'emails",
-        min_value=1,
-        max_value=100,
-        value=20,
-    )
-    gmail_projet = st.text_input("Projet", value="non_defini", key="gmail_project")
-    gmail_lot = st.text_input("Lot technique", value="non_defini", key="gmail_lot")
-    gmail_criticite = st.selectbox(
-        "Criticité",
-        ["normale", "haute", "critique", "faible"],
-        key="gmail_criticite",
-    )
+    meta_cols = st.columns(3)
+    with meta_cols[0]:
+        gmail_projet = st.text_input("Projet", value="", placeholder="emails_btp par defaut", key="gmail_project")
+    with meta_cols[1]:
+        gmail_lot = st.text_input("Lot", value="", placeholder="communication_chantier par defaut", key="gmail_lot")
+    with meta_cols[2]:
+        gmail_criticite = st.selectbox(
+            "Criticite",
+            ["normale", "haute", "critique", "faible"],
+            key="gmail_criticite",
+        )
 
     gmail_filtrer_btp = st.checkbox(
-        "Filtrer uniquement les emails BTP",
+        "Filtrer les emails non-BTP",
         value=True,
-        help="Désactive ce filtre seulement en mode debug.",
+        help="Garde seulement les emails avec vocabulaire chantier/BTP et evite les newsletters.",
     )
 
-    if st.button("Ingérer les emails Gmail"):
+    if st.button("Importer les emails", disabled=email_provider != "gmail"):
         payload = {
             "query": gmail_query or None,
             "max_results": int(gmail_max_results),
-            "projet": gmail_projet,
-            "lot_technique": gmail_lot,
+            "projet": gmail_projet.strip() or "emails_btp",
+            "lot_technique": gmail_lot.strip() or "communication_chantier",
             "criticite": gmail_criticite,
             "filtrer_btp": gmail_filtrer_btp,
         }

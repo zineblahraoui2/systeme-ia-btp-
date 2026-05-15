@@ -147,6 +147,25 @@ def has_valid_gmail_token() -> bool:
     return get_valid_gmail_credentials() is not None
 
 
+def gmail_configuration_status() -> dict:
+    """Retourne l'etat de configuration Gmail sans exposer les secrets."""
+    settings = get_settings()
+    credentials_path, token_path = _credentials_paths()
+    token_configured = bool(_current_gmail_token()) or token_path.exists()
+    credentials_configured = bool(settings.gmail_credentials) or credentials_path.exists()
+    provider_configured = credentials_configured or token_configured
+    connected = has_valid_gmail_token()
+    return {
+        "provider": "gmail",
+        "providers_configures": ["gmail"] if provider_configured else [],
+        "provider_configured": provider_configured,
+        "credentials_configured": credentials_configured,
+        "token_configured": token_configured,
+        "connected": connected,
+        "need_auth": not connected,
+    }
+
+
 def generate_auth_url(state: Optional[str] = None, code_verifier: Optional[str] = None) -> dict[str, str]:
     flow = _build_flow(state=state)
     code_verifier = code_verifier or _base64url_no_padding(secrets.token_bytes(64))
