@@ -30,7 +30,7 @@ import uuid
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, UploadFile, File, Form, Query
 from pydantic import BaseModel
@@ -73,6 +73,35 @@ if not any(isinstance(handler, logging.FileHandler) for handler in logger.handle
 _jobs: dict[str, dict] = {}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".bmp"}
 OAUTH_STATE_TTL_SECONDS = 15 * 60
+HISTORIQUE_MAX_ECHANGES = 100
+
+
+def _historique_path() -> Path:
+    settings = get_settings()
+    base_dir = Path("/data") if settings.is_railway else Path("data")
+    base_dir.mkdir(parents=True, exist_ok=True)
+    return base_dir / "historique.json"
+
+
+def _lire_historique() -> list[dict]:
+    path = _historique_path()
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
+    except Exception as exc:
+        logger.warning("Lecture historique impossible: %s", exc)
+    return []
+
+
+def _ecrire_historique(echanges: list[dict]) -> None:
+    path = _historique_path()
+    path.write_text(
+        json.dumps(echanges[-HISTORIQUE_MAX_ECHANGES:], ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def _duplicate_payload(file_hash: str) -> Optional[dict]:
@@ -289,6 +318,12 @@ class QuestionRequest(BaseModel):
     question: str
     projet: Optional[str] = None
     k: Optional[int] = None
+
+
+class HistoriqueRequest(BaseModel):
+    question: str
+    reponse: Any
+    date: Optional[str] = None
 
 
 class TexteIngestionRequest(BaseModel):
@@ -655,6 +690,39 @@ async def poser_question(body: QuestionRequest):
             time.perf_counter() - started_at,
         )
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/historique", summary="Retourner les derniers echanges du Chat RAG")
+async def get_historique(limit: int = Query(50, ge=1, le=HISTORIQUE_MAX_ECHANGES)):
+    historique = _lire_historique()
+    return {
+        "total": len(historique),
+        "limit": limit,
+        "echanges": historique[-limit:],
+    }
+
+
+@router.post("/historique", summary="Sauvegarder un echange du Chat RAG")
+async def post_historique(body: HistoriqueRequest):
+    historique = _lire_historique()
+    echange = {
+        "question": body.question,
+        "reponse": body.reponse,
+        "date": body.date or datetime.utcnow().isoformat(timespec="seconds") + "Z",
+    }
+    historique.append(echange)
+    _ecrire_historique(historique)
+    return {
+        "statut": "succès",
+        "message": "Echange sauvegarde.",
+        "total": len(_lire_historique()),
+    }
+
+
+@router.delete("/historique", summary="Effacer l'historique du Chat RAG")
+async def delete_historique():
+    _ecrire_historique([])
+    return {"statut": "succès", "message": "Historique efface.", "total": 0}
 
 
 @router.post("/conformite", summary="Vérifier la conformité d'un élément aux normes BTP")

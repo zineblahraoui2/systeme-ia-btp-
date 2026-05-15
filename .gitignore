@@ -8,6 +8,7 @@ __pycache__/
 chroma_db/
 uploads/
 logs/
+data/historique.json
 *.zip
 *.jfif
 *.jpg

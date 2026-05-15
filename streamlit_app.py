@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import socket
 import time
 
@@ -108,6 +109,67 @@ def render_markdown_response(data: dict) -> None:
     st.markdown("<div class='answer-box'>", unsafe_allow_html=True)
     st.markdown(content)
     st.markdown("</div>", unsafe_allow_html=True)
+
+
+def load_chat_history(force: bool = False) -> list[dict]:
+    api_base_url = st.session_state.get("api_base_url", DEFAULT_API_URL)
+    loaded_from = st.session_state.get("rag_history_loaded_from")
+    if not force and loaded_from == api_base_url and "rag_history" in st.session_state:
+        return st.session_state.rag_history
+
+    try:
+        response = requests.get(api_url("/historique"), params={"limit": 100}, timeout=API_TIMEOUT_SECONDS)
+        if response.ok:
+            st.session_state.rag_history = response.json().get("echanges", [])
+            st.session_state.rag_history_loaded_from = api_base_url
+        else:
+            st.session_state.setdefault("rag_history", [])
+    except requests.RequestException:
+        st.session_state.setdefault("rag_history", [])
+    return st.session_state.rag_history
+
+
+def save_chat_history(question: str, reponse) -> None:
+    echange = {
+        "question": question,
+        "reponse": reponse,
+        "date": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    st.session_state.setdefault("rag_history", []).append(echange)
+    st.session_state.rag_history = st.session_state.rag_history[-100:]
+    try:
+        requests.post(api_url("/historique"), json=echange, timeout=API_TIMEOUT_SECONDS)
+    except requests.RequestException:
+        st.warning("Réponse affichée, mais l'historique n'a pas pu être sauvegardé côté backend.")
+
+
+def clear_chat_history() -> bool:
+    try:
+        response = requests.delete(api_url("/historique"), timeout=API_TIMEOUT_SECONDS)
+        if response.ok:
+            st.session_state.rag_history = []
+            st.session_state.rag_history_loaded_from = st.session_state.get("api_base_url", DEFAULT_API_URL)
+            return True
+        show_response(response)
+    except requests.RequestException as exc:
+        st.error(f"Erreur API : {exc}")
+    return False
+
+
+def render_chat_history() -> None:
+    history = st.session_state.get("rag_history", [])
+    if not history:
+        st.caption("Aucun échange sauvegardé pour le moment.")
+        return
+
+    for index, item in enumerate(reversed(history), start=1):
+        label = item.get("question", "Question")
+        if len(label) > 80:
+            label = f"{label[:77]}..."
+        with st.expander(f"{index}. {label}", expanded=index == 1):
+            st.caption(item.get("date", ""))
+            st.markdown(f"**Question**\n\n{item.get('question', '')}")
+            render_markdown_response({"reponse": item.get("reponse", "")})
 
 
 def _html_badge(value: str, color: str) -> str:
@@ -245,6 +307,9 @@ with st.sidebar:
     st.code(f"py -m uvicorn main:app --reload --port {config.API_PORT}")
 
 
+load_chat_history()
+
+
 tab_chat, tab_ingest, tab_reglementaire, tab_analysis, tab_knowledge, tab_admin = st.tabs(
     ["Question", "Ingestion", "Base Réglementaire", "Analyse", "🧠 Mémoire Projet", "Admin"]
 )
@@ -252,6 +317,17 @@ tab_chat, tab_ingest, tab_reglementaire, tab_analysis, tab_knowledge, tab_admin 
 
 with tab_chat:
     st.subheader("Question sur la base documentaire")
+    hist_col, clear_col = st.columns([3, 1])
+    with hist_col:
+        st.markdown("**Historique du Chat RAG**")
+    with clear_col:
+        if st.button("Effacer l'historique"):
+            if clear_chat_history():
+                st.success("Historique effacé.")
+                st.rerun()
+    render_chat_history()
+    st.divider()
+
     col_a, col_b = st.columns([2, 1])
     with col_a:
         question = st.text_area(
@@ -271,8 +347,10 @@ with tab_chat:
             try:
                 response = requests.post(api_url("/question"), json=payload, timeout=API_TIMEOUT_SECONDS)
                 if response.ok:
+                    response_data = response.json()
                     st.success("Requête réussie")
-                    render_markdown_response(response.json())
+                    render_markdown_response(response_data)
+                    save_chat_history(question.strip(), response_data.get("reponse", response_data))
                 else:
                     show_response(response)
             except requests.RequestException as exc:
