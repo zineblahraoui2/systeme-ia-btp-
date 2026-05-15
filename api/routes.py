@@ -17,8 +17,13 @@ GET  /alertes             : Alertes documents critiques
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
 import logging
 import os
+import secrets
 import shutil
 import tempfile
 import time
@@ -64,16 +69,59 @@ if not any(isinstance(handler, logging.FileHandler) for handler in logger.handle
         logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
     )
     logger.addHandler(file_handler)
-oauth_pkce_sessions: dict[str, str] = {}
 _jobs: dict[str, dict] = {}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".bmp"}
+OAUTH_STATE_TTL_SECONDS = 15 * 60
 
 
-def _remember_pkce_verifier(auth_data: dict) -> None:
-    state = auth_data.get("state")
-    code_verifier = auth_data.get("code_verifier")
-    if state and code_verifier:
-        oauth_pkce_sessions[state] = code_verifier
+def _b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def _b64url_decode(data: str) -> bytes:
+    return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
+
+
+def _sign_oauth_state(code_verifier: str) -> str:
+    settings = get_settings()
+    payload = {
+        "code_verifier": code_verifier,
+        "iat": int(time.time()),
+        "nonce": secrets.token_urlsafe(16),
+    }
+    payload_b64 = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    signature = hmac.new(settings.secret_key.encode("utf-8"), payload_b64.encode("ascii"), hashlib.sha256).digest()
+    return f"{payload_b64}.{_b64url_encode(signature)}"
+
+
+def _verify_oauth_state(state: Optional[str]) -> Optional[str]:
+    if not state or "." not in state:
+        logger.warning("OAuth Gmail state absent ou mal forme")
+        return None
+    try:
+        payload_b64, signature_b64 = state.rsplit(".", 1)
+        settings = get_settings()
+        expected_signature = hmac.new(
+            settings.secret_key.encode("utf-8"),
+            payload_b64.encode("ascii"),
+            hashlib.sha256,
+        ).digest()
+        received_signature = _b64url_decode(signature_b64)
+        if not hmac.compare_digest(expected_signature, received_signature):
+            logger.warning("OAuth Gmail state signature invalide")
+            return None
+        payload = json.loads(_b64url_decode(payload_b64).decode("utf-8"))
+        if int(time.time()) - int(payload.get("iat", 0)) > OAUTH_STATE_TTL_SECONDS:
+            logger.warning("OAuth Gmail state expire")
+            return None
+        code_verifier = payload.get("code_verifier")
+        if not code_verifier:
+            logger.warning("OAuth Gmail state sans code_verifier")
+            return None
+        return str(code_verifier)
+    except Exception as exc:
+        logger.warning("OAuth Gmail state introuvable ou invalide: %s", exc)
+        return None
 
 
 def _traiter_image_background(
@@ -174,8 +222,10 @@ async def gmail_login():
     try:
         if has_valid_gmail_token():
             return {"need_auth": False, "message": "Gmail deja connecte."}
-        auth_data = generate_auth_url()
-        _remember_pkce_verifier(auth_data)
+        code_verifier = _b64url_encode(secrets.token_bytes(64))
+        signed_state = _sign_oauth_state(code_verifier)
+        auth_data = generate_auth_url(state=signed_state, code_verifier=code_verifier)
+        auth_data.pop("code_verifier", None)
         return {"need_auth": True, **auth_data}
     except FileNotFoundError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -187,8 +237,9 @@ async def gmail_login():
 async def gmail_callback(code: str, state: Optional[str] = None):
     """Echange le code OAuth Google et sauvegarde token.json."""
     try:
-        code_verifier = oauth_pkce_sessions.pop(state, None) if state else None
+        code_verifier = _verify_oauth_state(state)
         if not code_verifier:
+            logger.warning("Session OAuth Gmail introuvable ou expiree pour state=%s", bool(state))
             raise HTTPException(
                 status_code=400,
                 detail="Session OAuth introuvable ou expiree. Relance la connexion Gmail.",

@@ -26,6 +26,7 @@ CHROMA_COLLECTION_NAME = os.getenv("CHROMA_COLLECTION_NAME", "btp_knowledge")
 CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR") or ("/data/chroma_db" if IS_RAILWAY else "./chroma_db")
 GMAIL_CREDENTIALS = os.getenv("GMAIL_CREDENTIALS", None)
 GMAIL_TOKEN = os.getenv("GMAIL_TOKEN", None)
+SECRET_KEY = os.getenv("SECRET_KEY") or os.getenv("RAILWAY_SERVICE_ID") or "dev-secret-change-me"
 
 
 class Settings(BaseSettings):
@@ -81,6 +82,7 @@ class Settings(BaseSettings):
     app_port: int = API_PORT
     backend_url: str = BACKEND_URL
     is_railway: bool = IS_RAILWAY
+    secret_key: str = SECRET_KEY
     log_level: str = "INFO"
 
     class Config:

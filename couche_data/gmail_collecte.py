@@ -138,22 +138,23 @@ def has_valid_gmail_token() -> bool:
     return get_valid_gmail_credentials() is not None
 
 
-def generate_auth_url() -> dict[str, str]:
-    flow = _build_flow()
-    code_verifier = _base64url_no_padding(secrets.token_bytes(64))
+def generate_auth_url(state: Optional[str] = None, code_verifier: Optional[str] = None) -> dict[str, str]:
+    flow = _build_flow(state=state)
+    code_verifier = code_verifier or _base64url_no_padding(secrets.token_bytes(64))
     code_challenge = _base64url_no_padding(
         hashlib.sha256(code_verifier.encode("ascii")).digest()
     )
-    auth_url, state = flow.authorization_url(
+    auth_url, returned_state = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="true",
         prompt="consent",
+        state=state,
         code_challenge=code_challenge,
         code_challenge_method="S256",
     )
     return {
         "auth_url": auth_url,
-        "state": state,
+        "state": returned_state,
         "code_verifier": code_verifier,
     }
 
