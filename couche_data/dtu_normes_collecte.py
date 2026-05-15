@@ -20,6 +20,8 @@ NUMERO_RE = re.compile(
     r"\b((?:NF\s*)?(?:DTU|EN|ISO|NF\s*EN|EUROCODE)\s*[A-Z]*\s*\d+(?:[-\.]\d+)*(?:\s*[-:]\s*\d+)?)\b",
     re.I,
 )
+ISO_COMPLET_RE = re.compile(r"\bISO\s+(\d{4,5}(?:-\d+)?(?::\d{4})?)\b", re.I)
+ISO_FILENAME_RE = re.compile(r"\bISO[\s_-]*(\d{4,5})(?:[\s_:-]*(\d{4}))?\b", re.I)
 SECTION_RE = re.compile(r"^\s*(\d+(?:\.\d+){0,5})\s+(.{3,160})\s*$")
 ARTICLE_RE = re.compile(r"^\s*(?:Article\s+)?(\d+(?:\.\d+){1,6})\s*[-–:]?\s*(.{0,180})\s*$", re.I)
 TABLE_RE = re.compile(r"\b(tableau|table)\s+\d+", re.I)
@@ -37,6 +39,21 @@ DOMAINES = {
     "securite_incendie": ["incendie", "feu", "résistance au feu", "resistance au feu"],
     "bim": ["bim", "ifc", "iso 19650"],
 }
+ISO_DOMAINES = {
+    "9001": "qualite_management",
+    "14001": "environnement",
+    "45001": "securite_travail",
+    "9000": "qualite_vocabulaire",
+}
+TITLE_IGNORE_TERMS = (
+    "tous droits réservés",
+    "tous droits reserves",
+    "copyright",
+    "accordé sous licence",
+    "accorde sous licence",
+    "© iso",
+    "(c) iso",
+)
 
 
 def est_document_reglementaire(nom_fichier: str, extrait: str = "") -> bool:
@@ -364,9 +381,59 @@ def _extraire_tables(fichier_path: str) -> dict[int, list[str]]:
     return tables
 
 
+def _format_iso_code(code: str, year: str = "") -> str:
+    normalized = code.strip().replace(" ", "")
+    if ":" in normalized:
+        return f"ISO {normalized}"
+    if year:
+        return f"ISO {normalized}:{year}"
+    return f"ISO {normalized}"
+
+
+def _iso_code_key(numero: str) -> str:
+    match = re.search(r"\bISO\s+(\d{4,5})", numero or "", re.I)
+    return match.group(1) if match else ""
+
+
+def _iso_depuis_nom_fichier(nom_fichier: str) -> str:
+    normalized = Path(nom_fichier).stem.replace("-", " ").replace("_", " ")
+    match = ISO_FILENAME_RE.search(normalized)
+    if not match:
+        return ""
+    return _format_iso_code(match.group(1), match.group(2) or "")
+
+
+def _iso_depuis_texte(texte: str) -> str:
+    for match in ISO_COMPLET_RE.finditer(texte[:8000]):
+        code = match.group(1)
+        # Evite les faux positifs de type "ISO 2015" issus des pages copyright.
+        if code in {"2015", "2018", "2020", "2021", "2022", "2023", "2024", "2025", "2026"}:
+            continue
+        return _format_iso_code(code)
+    return ""
+
+
+def _fallback_nom_norme(nom_fichier: str) -> str:
+    stem = Path(nom_fichier).stem.strip()
+    return stem or "Non trouvé"
+
+
 def _numero_norme(texte: str, nom_fichier: str) -> str:
+    iso_from_file = _iso_depuis_nom_fichier(nom_fichier)
+    if iso_from_file:
+        return iso_from_file
+
+    iso_from_text = _iso_depuis_texte(texte)
+    if iso_from_text:
+        return iso_from_text
+
     match = NUMERO_RE.search(f"{nom_fichier}\n{texte[:3000]}")
-    return match.group(1).upper().strip() if match else "Non trouvé"
+    if match:
+        numero = match.group(1).upper().strip()
+        if not re.fullmatch(r"ISO\s+(19|20)\d{2}", numero, re.I):
+            return numero
+
+    return _fallback_nom_norme(nom_fichier)
 
 
 def _type_document(numero: str, texte: str) -> str:
@@ -376,18 +443,46 @@ def _type_document(numero: str, texte: str) -> str:
     return "NORME"
 
 
-def _titre(texte: str, numero: str) -> str:
+def _ligne_titre_valide(line: str) -> bool:
+    lower = line.lower()
+    if any(term in lower for term in TITLE_IGNORE_TERMS):
+        return False
+    if lower.startswith(("page ", "sommaire", "avant-propos", "foreword")):
+        return False
+    if re.fullmatch(r"(?:iso\s*)?(?:19|20)\d{2}", lower.strip(), re.I):
+        return False
+    return 8 <= len(line) <= 220
+
+
+def _titre(texte: str, numero: str, nom_fichier: str = "") -> str:
     lines = [line.strip() for line in texte.splitlines() if line.strip()]
-    for line in lines[:30]:
-        if numero != "Non trouvé" and numero.lower() in line.lower() and len(line) > len(numero) + 4:
-            return line[:220]
-    for line in lines[:20]:
-        if 8 <= len(line) <= 220 and not line.lower().startswith(("page ", "sommaire")):
-            return line
-    return "Non trouvé"
+    clean_lines = [line for line in lines if _ligne_titre_valide(line)]
+    numero_lower = (numero or "").lower()
+
+    if numero and numero != "Non trouvé":
+        for index, line in enumerate(clean_lines[:120]):
+            lower = line.lower()
+            if numero_lower in lower and len(line) > len(numero) + 4:
+                return line[:220]
+            if numero_lower in lower:
+                for candidate in clean_lines[index + 1 : index + 5]:
+                    if numero_lower not in candidate.lower() and _ligne_titre_valide(candidate):
+                        return candidate[:220]
+
+    for line in clean_lines[:40]:
+        # Pour ISO, evite de prendre la seule reference comme titre.
+        if numero_lower and line.lower() == numero_lower:
+            continue
+        return line[:220]
+
+    return Path(nom_fichier).stem if nom_fichier else "Non trouvé"
 
 
-def _domaine(texte: str) -> str:
+def _domaine(texte: str, numero: str = "") -> str:
+    iso_key = _iso_code_key(numero)
+    if iso_key:
+        return ISO_DOMAINES.get(iso_key, "normes_generales")
+
     lower = texte.lower()
     for domaine, mots in DOMAINES.items():
         if any(mot in lower for mot in mots):
@@ -514,8 +609,8 @@ def extraire_dtu_norme_pdf(
     tables = _extraire_tables(fichier_path)
     numero = _numero_norme(total_text, Path(fichier_path).name)
     type_document = _type_document(numero, total_text)
-    titre = _titre(total_text, numero)
-    domaine = _domaine(total_text)
+    titre = _titre(total_text, numero, Path(fichier_path).name)
+    domaine = _domaine(total_text, numero)
     date_norme = _date_norme(total_text)
     organisme = _organisme(total_text)
     structural_chunks = _chunk_structurel(pages, tables)
