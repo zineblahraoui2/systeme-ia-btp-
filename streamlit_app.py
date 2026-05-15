@@ -33,6 +33,21 @@ def auth_url(path: str) -> str:
     return f"{base_url}{path}"
 
 
+def sync_gmail_status(force: bool = False) -> bool:
+    if not force and "gmail_connected" in st.session_state:
+        return bool(st.session_state.gmail_connected)
+    try:
+        response = requests.get(auth_url("/auth/gmail/status"), timeout=API_TIMEOUT_SECONDS)
+        if response.ok:
+            data = response.json()
+            st.session_state.gmail_connected = bool(data.get("connected"))
+        else:
+            st.session_state.gmail_connected = False
+    except requests.RequestException:
+        st.session_state.gmail_connected = False
+    return bool(st.session_state.gmail_connected)
+
+
 def show_response(response: requests.Response) -> None:
     try:
         data = response.json()
@@ -127,6 +142,7 @@ with st.sidebar:
         "URL API",
         value=st.session_state.get("api_base_url", DEFAULT_API_URL),
     )
+    sync_gmail_status(force=True)
 
     if st.button("Tester /health", use_container_width=True):
         try:
@@ -292,6 +308,11 @@ with tab_ingest:
 
     st.divider()
     st.markdown("**Gmail**")
+    gmail_connected = sync_gmail_status()
+    if gmail_connected:
+        st.success("Gmail connectÃ©")
+    else:
+        st.info("Gmail non connectÃ©")
     gmail_query = st.text_input(
         "Requête Gmail",
         value="newer_than:30d (BTP OR chantier OR travaux OR béton OR fondation OR lot OR retard OR livraison OR fournisseur OR maçonnerie OR gros_oeuvre)",
@@ -324,6 +345,7 @@ with tab_ingest:
                 auth_response = requests.get(auth_url("/auth/gmail/login"), timeout=API_TIMEOUT_SECONDS)
             auth_response.raise_for_status()
             auth_data = auth_response.json()
+            st.session_state.gmail_connected = not bool(auth_data.get("need_auth"))
 
             if auth_data.get("need_auth"):
                 st.warning("Connexion Gmail requise.")
@@ -337,9 +359,12 @@ with tab_ingest:
                     show_response(response)
                 else:
                     if response.ok and data.get("need_auth"):
+                        st.session_state.gmail_connected = False
                         st.warning("Connexion Gmail requise.")
                         st.link_button("Connecter Gmail", data["auth_url"])
                     else:
+                        if response.ok:
+                            st.session_state.gmail_connected = True
                         show_response(response)
         except requests.RequestException as exc:
             st.error(f"Erreur API : {exc}")

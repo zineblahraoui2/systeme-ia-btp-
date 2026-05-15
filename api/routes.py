@@ -233,6 +233,25 @@ async def gmail_login():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@auth_router.get("/auth/gmail/status", summary="Statut OAuth Gmail")
+async def gmail_status():
+    """Indique si un token Gmail valide existe cote backend."""
+    try:
+        connected = has_valid_gmail_token()
+        return {
+            "connected": connected,
+            "need_auth": not connected,
+            "message": "Gmail connecte." if connected else "Connexion Gmail requise.",
+        }
+    except Exception as e:
+        logger.warning("Impossible de verifier le statut Gmail: %s", e)
+        return {
+            "connected": False,
+            "need_auth": True,
+            "message": "Connexion Gmail requise.",
+        }
+
+
 @auth_router.get("/auth/gmail/callback", summary="Callback OAuth Gmail")
 async def gmail_callback(code: str, state: Optional[str] = None):
     """Echange le code OAuth Google et sauvegarde token.json."""
