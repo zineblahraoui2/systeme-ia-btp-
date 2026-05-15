@@ -246,7 +246,7 @@ with st.sidebar:
 
 
 tab_chat, tab_ingest, tab_reglementaire, tab_analysis, tab_knowledge, tab_admin = st.tabs(
-    ["Question", "Ingestion", "Base Réglementaire", "Analyse", "🗄️ Knowledge", "Admin"]
+    ["Question", "Ingestion", "Base Réglementaire", "Analyse", "🧠 Mémoire Projet", "Admin"]
 )
 
 
@@ -573,7 +573,7 @@ with tab_analysis:
 
 
 with tab_knowledge:
-    st.markdown("<div class='section-title'>Knowledge Base</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-title'>Mémoire Projet IA</div>", unsafe_allow_html=True)
     try:
         response = requests.get(api_url("/knowledge/documents"), timeout=API_TIMEOUT_SECONDS)
         response.raise_for_status()
