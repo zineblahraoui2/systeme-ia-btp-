@@ -311,6 +311,7 @@ class GmailIngestionRequest(BaseModel):
     projet: str = "non_defini"
     lot_technique: str = "non_defini"
     criticite: str = "normale"
+    filtrer_btp: bool = True
 
 
 class DtuSearchRequest(BaseModel):
@@ -540,6 +541,7 @@ async def ingerer_gmail_route(body: GmailIngestionRequest):
             projet=body.projet,
             lot_technique=body.lot_technique,
             criticite=body.criticite,
+            filtrer_btp=body.filtrer_btp,
         )
         if result.get("need_auth"):
             return _gmail_signed_auth_response(result.get("message", "Connexion Gmail requise avant l'ingestion."))

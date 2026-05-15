@@ -226,6 +226,7 @@ def ingerer_gmail(
     projet: str = "non_defini",
     lot_technique: str = "non_defini",
     criticite: str = "normale",
+    filtrer_btp: bool = True,
 ) -> dict:
     """
     Workflow d'ingestion des emails Gmail via Google credentials.
@@ -250,10 +251,38 @@ def ingerer_gmail(
     )
     if not docs:
         return {"statut": "erreur", "message": "Aucun email trouve pour cette requete."}
+    emails_trouves = len(docs)
+
+    if filtrer_btp:
+        docs = _filtrer_emails_btp(docs, projet=projet)
+    emails_filtres = len(docs)
+    emails_rejetes = emails_trouves - emails_filtres
+
+    if not docs:
+        return {
+            "statut": "erreur",
+            "source": "gmail",
+            "projet": projet,
+            "query": query,
+            "emails_trouves": emails_trouves,
+            "emails_filtres": 0,
+            "emails_ingeres": 0,
+            "emails_rejetes": emails_rejetes,
+            "filtrer_btp": filtrer_btp,
+            "message": "Aucun email pertinent BTP apres filtrage.",
+        }
 
     docs = nettoyer(docs)
     if not docs:
-        return {"statut": "erreur", "message": "Emails vides ou trop courts apres nettoyage."}
+        return {
+            "statut": "erreur",
+            "message": "Emails vides ou trop courts apres nettoyage.",
+            "emails_trouves": emails_trouves,
+            "emails_filtres": emails_filtres,
+            "emails_ingeres": 0,
+            "emails_rejetes": emails_rejetes,
+            "filtrer_btp": filtrer_btp,
+        }
 
     vectoriser(docs)
     stats = stats_collection()
@@ -263,9 +292,48 @@ def ingerer_gmail(
         "source": "gmail",
         "projet": projet,
         "query": query,
+        "emails_trouves": emails_trouves,
+        "emails_filtres": emails_filtres,
         "emails_ingeres": len(docs),
+        "emails_rejetes": emails_rejetes,
+        "filtrer_btp": filtrer_btp,
         "stats_collection": stats,
     }
+
+
+MOTS_CLES_BTP_EMAIL = [
+    "chantier", "béton", "beton", "fondation", "dtu", "travaux",
+    "maçonnerie", "maconnerie", "devis", "charpente", "plomberie",
+    "électricité", "electricite", "gros œuvre", "gros oeuvre",
+    "second œuvre", "second oeuvre", "btp", "construction",
+    "rénovation", "renovation", "architecte", "conducteur de travaux",
+    "lot", "planning chantier", "réception", "reception", "livraison",
+    "conformité", "conformite", "sécurité chantier", "securite chantier",
+    "mur", "dalle", "toiture", "façade", "facade", "ferraillage",
+]
+
+
+def _filtrer_emails_btp(documents: list, projet: str = "non_defini") -> list:
+    projet_normalise = (projet or "").strip().lower()
+    filtrer_projet = projet_normalise not in {"", "non_defini", "non_défini", "non défini"}
+    filtered = []
+
+    for doc in documents:
+        meta = doc.metadata or {}
+        haystack = "\n".join(
+            [
+                str(meta.get("email_subject", "")),
+                str(meta.get("email_from", "")),
+                doc.page_content or "",
+            ]
+        ).lower()
+        if not any(keyword.lower() in haystack for keyword in MOTS_CLES_BTP_EMAIL):
+            continue
+        if filtrer_projet and projet_normalise not in haystack:
+            continue
+        filtered.append(doc)
+
+    return filtered
 
 
 # ─────────────────────────────────────────────

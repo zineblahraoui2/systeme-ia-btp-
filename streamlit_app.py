@@ -425,6 +425,12 @@ with tab_ingest:
         key="gmail_criticite",
     )
 
+    gmail_filtrer_btp = st.checkbox(
+        "Filtrer uniquement les emails BTP",
+        value=True,
+        help="Désactive ce filtre seulement en mode debug.",
+    )
+
     if st.button("Ingérer les emails Gmail"):
         payload = {
             "query": gmail_query or None,
@@ -432,6 +438,7 @@ with tab_ingest:
             "projet": gmail_projet,
             "lot_technique": gmail_lot,
             "criticite": gmail_criticite,
+            "filtrer_btp": gmail_filtrer_btp,
         }
         try:
             with st.spinner("Vérification de la connexion Gmail..."):
